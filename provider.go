@@ -18,14 +18,24 @@ var (
 
 // DynatraceProvider is a Dynatrace OpenFeature provider for server-side Go applications.
 type DynatraceProvider struct {
-	events chan openfeature.Event
+	options Options
+	events  chan openfeature.Event
 }
 
-// NewProvider creates a stub DynatraceProvider.
-func NewProvider() *DynatraceProvider {
-	return &DynatraceProvider{
-		events: make(chan openfeature.Event, 8),
+// ProviderOption is a functional option for DynatraceProvider.
+type ProviderOption func(*DynatraceProvider)
+
+// NewProvider creates a stub DynatraceProvider. Options support added; full
+// fetch/evaluate implementation comes in PR 4.
+func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
+	p := &DynatraceProvider{
+		options: options,
+		events:  make(chan openfeature.Event, 8),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *DynatraceProvider) Metadata() openfeature.Metadata {
