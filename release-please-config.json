@@ -1,0 +1,8 @@
+{
+  "release-type": "go",
+  "prerelease": true,
+  "prerelease-type": "alpha",
+  "packages": {
+    ".": {}
+  }
+}
