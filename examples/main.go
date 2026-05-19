@@ -10,34 +10,62 @@ import (
 	openfeature "github.com/open-feature/go-sdk/openfeature"
 )
 
+// Usage:
+//
+//	DT_SDK_KEY=dt01.server_... \
+//	DT_CDN_BASE_URL=https://cdn.eu.fm.dynatracelabs.com/server/ \  # optional; omit for prod
+//	DT_TARGETING_KEY=my-user \
+//	DT_EMAIL=me@example.com \
+//	go run ./examples
 func main() {
 	sdkKey := os.Getenv("DT_SDK_KEY")
 	if sdkKey == "" {
-		log.Fatal("DT_SDK_KEY environment variable is required")
+		log.Fatal("DT_SDK_KEY is required")
 	}
 
-	options, err := dynatrace.FromSDKKey(sdkKey)
+	var providerOpts []dynatrace.Option
+	if base := os.Getenv("DT_CDN_BASE_URL"); base != "" {
+		providerOpts = append(providerOpts, dynatrace.WithCDNBaseURL(base))
+	}
+
+	options, err := dynatrace.FromSDKKey(sdkKey, providerOpts...)
 	if err != nil {
 		log.Fatalf("invalid sdk key: %v", err)
 	}
+	fmt.Println("public key:", options.PublicKey())
+	fmt.Println("cdn url:   ", options.CDNURL())
 
 	provider := dynatrace.NewProvider(options)
-	if err := openfeature.SetProvider(provider); err != nil {
-		log.Fatalf("failed to set provider: %v", err)
+	if err := openfeature.SetProviderAndWait(provider); err != nil {
+		log.Fatalf("provider init failed: %v", err)
 	}
+	fmt.Println("provider:   READY")
 
-	client := openfeature.NewClient("my-app")
-
-	value, err := client.BooleanValue(
-		context.Background(),
-		"my-feature-flag",
-		false,
-		openfeature.NewEvaluationContext("user-123", nil),
+	client := openfeature.NewClient("example")
+	ctx := context.Background()
+	evalCtx := openfeature.NewEvaluationContext(
+		os.Getenv("DT_TARGETING_KEY"),
+		map[string]any{"email": os.Getenv("DT_EMAIL")},
 	)
-	if err != nil {
-		log.Printf("evaluation error: %v", err)
+
+	// Evaluate a sample of known flags from the dev environment.
+	boolFlags := []string{"boolean-flag", "parth-test-feature"}
+	strFlags := []string{"string-flag"}
+	floatFlags := []string{"number-flag"}
+
+	fmt.Println()
+	for _, flag := range boolFlags {
+		d, _ := client.BooleanValueDetails(ctx, flag, false, evalCtx)
+		fmt.Printf("  %-25s bool    = %-5v variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
 	}
-	fmt.Printf("my-feature-flag = %v\n", value)
+	for _, flag := range strFlags {
+		d, _ := client.StringValueDetails(ctx, flag, "", evalCtx)
+		fmt.Printf("  %-25s string  = %-10q variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
+	}
+	for _, flag := range floatFlags {
+		d, _ := client.FloatValueDetails(ctx, flag, 0, evalCtx)
+		fmt.Printf("  %-25s float   = %-5v variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
+	}
 
 	openfeature.Shutdown()
 }
