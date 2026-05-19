@@ -1,5 +1,10 @@
 # Dynatrace OpenFeature Provider for Go
 
+[![CI](https://github.com/Dynatrace/openfeature-provider-go/actions/workflows/ci.yml/badge.svg)](https://github.com/Dynatrace/openfeature-provider-go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Dynatrace/openfeature-provider-go.svg)](https://pkg.go.dev/github.com/Dynatrace/openfeature-provider-go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Dynatrace/openfeature-provider-go)](https://goreportcard.com/report/github.com/Dynatrace/openfeature-provider-go)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A server-side [OpenFeature](https://openfeature.dev) provider for Go that evaluates feature flags
 in-process using configuration fetched from the Dynatrace CDN.
 
