@@ -32,7 +32,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid sdk key: %v", err)
 	}
-	fmt.Println("public key:", options.PublicKey())
 	fmt.Println("cdn url:   ", options.CDNURL())
 
 	provider := dynatrace.NewProvider(options)
@@ -49,7 +48,7 @@ func main() {
 	)
 
 	// Evaluate a sample of known flags from the dev environment.
-	boolFlags := []string{"boolean-flag", "parth-test-feature"}
+	boolFlags := []string{"boolean-flag"}
 	strFlags := []string{"string-flag"}
 	floatFlags := []string{"number-flag"}
 
