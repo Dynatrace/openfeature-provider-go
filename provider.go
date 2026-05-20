@@ -36,11 +36,12 @@ var (
 // DynatraceProvider is a Dynatrace OpenFeature provider for server-side Go applications.
 // Use NewProvider to construct one, then register via openfeature.SetProvider.
 type DynatraceProvider struct {
-	options      Options
+	config       providerConfig
 	evaluator    evaluator.IEvaluator
 	fetcher      *internal.CDNFetcher
 	poller       *internal.PollingManager
 	httpClient   *http.Client
+	cdnBaseURL   string
 	events       chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
@@ -51,8 +52,15 @@ type DynatraceProvider struct {
 	shutdownOnce sync.Once
 }
 
-// ProviderOption is a functional option for DynatraceProvider.
+// ProviderOption configures a DynatraceProvider.
 type ProviderOption func(*DynatraceProvider)
+
+// WithCDNBaseURL overrides the CDN base URL. For dev/labs environments.
+// A trailing slash is appended automatically if missing.
+// Production URL is derived automatically from the SDK key.
+func WithCDNBaseURL(base string) ProviderOption {
+	return func(p *DynatraceProvider) { p.cdnBaseURL = base }
+}
 
 // WithHTTPClient injects a custom HTTP client (e.g. a test server client).
 func WithHTTPClient(c *http.Client) ProviderOption {
@@ -74,15 +82,15 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
 }
 
-// NewProvider creates a DynatraceProvider for the given Options.
-func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
+// NewProvider creates a DynatraceProvider for the given SDK key.
+// The key is validated immediately; an error is returned if the format is invalid.
+func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, error) {
 	zapLog := zap.NewNop()
 	log := logger.NewLogger(zapLog, false)
 	flagStore, _ := store.NewStore(log, nil)
 	eval := evaluator.NewJSON(log, flagStore)
 
 	p := &DynatraceProvider{
-		options:      options,
 		evaluator:    eval,
 		events:       make(chan openfeature.Event, 8),
 		pollInterval: defaultPollInterval,
@@ -92,8 +100,14 @@ func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
 	for _, opt := range opts {
 		opt(p)
 	}
-	p.fetcher = internal.NewCDNFetcher(options.CDNURL(), p.httpClient)
-	return p
+
+	cfg, err := parseSDKKey(sdkKey, p.cdnBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	p.config = cfg
+	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
+	return p, nil
 }
 
 // Metadata returns provider metadata.
@@ -106,7 +120,7 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook { return nil }
 
 // Init fetches the initial flag configuration and starts polling.
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
-	slog.Info("initializing dynatrace provider", "key", p.options.PublicKey())
+	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
 	result, fetchErr := p.fetcher.Fetch()
 	if fetchErr != nil {
@@ -121,7 +135,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	if setErr := p.evaluator.SetState(flagdsync.DataSync{
 		FlagData: result.Body,
-		Source:   p.options.CDNURL(),
+		Source:   p.config.cdnURL,
 	}); setErr != nil {
 		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
@@ -145,7 +159,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	)
 	p.poller.Start()
 
-	slog.Info("dynatrace provider initialized", "key", p.options.PublicKey())
+	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
 }
 
@@ -239,8 +253,7 @@ func (p *DynatraceProvider) ObjectEvaluation(ctx context.Context, flag string, d
 }
 
 func (p *DynatraceProvider) storeFlags(json string) ([]string, error) {
-	err := p.evaluator.SetState(flagdsync.DataSync{FlagData: json, Source: p.options.CDNURL()})
-	return nil, err
+	return nil, p.evaluator.SetState(flagdsync.DataSync{FlagData: json, Source: p.config.cdnURL})
 }
 
 func (p *DynatraceProvider) onFetchSuccess() {
