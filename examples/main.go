@@ -23,23 +23,20 @@ func main() {
 		log.Fatal("DT_SDK_KEY is required")
 	}
 
-	var providerOpts []dynatrace.Option
+	var opts []dynatrace.ProviderOption
 	if base := os.Getenv("DT_CDN_BASE_URL"); base != "" {
-		providerOpts = append(providerOpts, dynatrace.WithCDNBaseURL(base))
+		opts = append(opts, dynatrace.WithCDNBaseURL(base))
 	}
 
-	options, err := dynatrace.FromSDKKey(sdkKey, providerOpts...)
+	provider, err := dynatrace.NewProvider(sdkKey, opts...)
 	if err != nil {
 		log.Fatalf("invalid sdk key: %v", err)
 	}
-	fmt.Println("public key:", options.PublicKey())
-	fmt.Println("cdn url:   ", options.CDNURL())
 
-	provider := dynatrace.NewProvider(options)
 	if err := openfeature.SetProviderAndWait(provider); err != nil {
 		log.Fatalf("provider init failed: %v", err)
 	}
-	fmt.Println("provider:   READY")
+	fmt.Println("provider: READY")
 
 	client := openfeature.NewClient("example")
 	ctx := context.Background()
@@ -58,19 +55,15 @@ func main() {
 }
 
 func eval(client *openfeature.Client, ctx context.Context, evalCtx openfeature.EvaluationContext) {
-	boolFlags := []string{"boolean-flag"}
-	strFlags := []string{"string-flag"}
-	floatFlags := []string{"number-flag"}
-
-	for _, flag := range boolFlags {
+	for _, flag := range []string{"boolean-flag"} {
 		d, _ := client.BooleanValueDetails(ctx, flag, false, evalCtx)
 		fmt.Printf("  %-25s bool    = %-5v variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
 	}
-	for _, flag := range strFlags {
+	for _, flag := range []string{"string-flag"} {
 		d, _ := client.StringValueDetails(ctx, flag, "", evalCtx)
 		fmt.Printf("  %-25s string  = %-10q variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
 	}
-	for _, flag := range floatFlags {
+	for _, flag := range []string{"number-flag"} {
 		d, _ := client.FloatValueDetails(ctx, flag, 0, evalCtx)
 		fmt.Printf("  %-25s float   = %-5v variant=%-10q reason=%s\n", flag, d.Value, d.Variant, d.Reason)
 	}

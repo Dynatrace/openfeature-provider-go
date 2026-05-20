@@ -28,8 +28,6 @@ const testFlagJSON = `{
   }
 }`
 
-const testKey = "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
-
 func newTestServer(body string, status int) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"test-etag"`)
@@ -42,17 +40,19 @@ func newTestServer(body string, status int) *httptest.Server {
 
 func newTestProvider(t *testing.T, srv *httptest.Server) *DynatraceProvider {
 	t.Helper()
-	opts, err := FromSDKKey(testKey, WithCDNBaseURL(srv.URL+"/"))
-	require.NoError(t, err)
-	return NewProvider(opts,
+	p, err := NewProvider(validSDKKey,
+		WithCDNBaseURL(srv.URL+"/"),
 		WithHTTPClient(srv.Client()),
 		WithPollInterval(500*time.Millisecond),
 	)
+	require.NoError(t, err)
+	return p
 }
 
 func TestProvider_Metadata(t *testing.T) {
-	opts, _ := FromSDKKey(testKey)
-	assert.Equal(t, "dynatrace", NewProvider(opts).Metadata().Name)
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+	assert.Equal(t, "dynatrace", p.Metadata().Name)
 }
 
 func TestProvider_Init_Success(t *testing.T) {
@@ -84,8 +84,9 @@ func TestProvider_Init_Failure_EmptyBody(t *testing.T) {
 }
 
 func TestProvider_BooleanEvaluation_BeforeInit(t *testing.T) {
-	opts, _ := FromSDKKey(testKey)
-	result := NewProvider(opts).BooleanEvaluation(context.Background(), "my-bool", false, nil)
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+	result := p.BooleanEvaluation(context.Background(), "my-bool", false, nil)
 	assert.False(t, result.Value)
 	assert.NotEmpty(t, result.ResolutionError.Error())
 }
