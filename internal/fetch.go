@@ -25,9 +25,9 @@ type FetchResult struct {
 	LastModified string
 }
 
-func (r FetchResult) IsNotModified() bool { return r.Status == 304 }
-func (r FetchResult) IsRateLimited() bool { return r.Status == 429 }
-func (r FetchResult) IsSuccess() bool     { return r.Status >= 200 && r.Status < 300 }
+func (r FetchResult) IsNotModified() bool { return r.Status == http.StatusNotModified }
+func (r FetchResult) IsRateLimited() bool { return r.Status == http.StatusTooManyRequests }
+func (r FetchResult) IsSuccess() bool     { return r.Status >= http.StatusOK && r.Status < http.StatusMultipleChoices }
 
 // CDNFetcher performs conditional HTTP GETs against the Dynatrace CDN.
 // The fetchMu guards state mutation against concurrent callers (e.g. a future
@@ -38,10 +38,10 @@ type CDNFetcher struct {
 	client *http.Client
 	clock  func() time.Time
 
-	mu               sync.Mutex
-	etag             string
-	lastModified     string
-	lastModifiedAt   time.Time
+	mu                   sync.Mutex
+	headerETag            string
+	headerLastModified    string
+	storedLastModifiedAt  time.Time
 	rateLimitedUntil time.Time
 
 	fetchMu sync.Mutex
@@ -69,7 +69,7 @@ func (f *CDNFetcher) IsRateLimited() bool {
 func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 	if f.IsRateLimited() {
 		slog.Debug("rate limited; skipping cdn fetch")
-		return FetchResult{Status: 429}, nil
+		return FetchResult{Status: http.StatusTooManyRequests}, nil
 	}
 	if !f.fetchMu.TryLock() {
 		slog.Debug("fetch already in progress; returning 304")
@@ -81,9 +81,9 @@ func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 
 func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 	f.mu.Lock()
-	etag := f.etag
-	lastModified := f.lastModified
-	lastModifiedAt := f.lastModifiedAt
+	etag := f.headerETag
+	lastModified := f.headerLastModified
+	lastModifiedAt := f.storedLastModifiedAt
 	f.mu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.cdnURL, nil)
@@ -108,41 +108,41 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 
 	status := resp.StatusCode
 
-	if status == 304 {
-		return FetchResult{Status: 304, ETag: etag, LastModified: lastModified}, nil
+	if status == http.StatusNotModified {
+		return FetchResult{Status: http.StatusNotModified, ETag: etag, LastModified: lastModified}, nil
 	}
 
-	if status == 429 {
+	if status == http.StatusTooManyRequests {
 		delay := ParseRetryAfterDuration(resp.Header.Get("Retry-After"), f.clock())
 		f.mu.Lock()
 		f.rateLimitedUntil = f.clock().Add(delay)
 		f.mu.Unlock()
 		slog.Warn("cdn rate limited (429); pausing fetches", "delay_ms", delay.Milliseconds())
-		return FetchResult{Status: 429}, nil
+		return FetchResult{Status: http.StatusTooManyRequests}, nil
 	}
 
 	newETag := resp.Header.Get("ETag")
 	newLastModifiedStr := resp.Header.Get("Last-Modified")
 
-	if status >= 200 && status < 300 {
+	if status >= http.StatusOK && status < http.StatusMultipleChoices {
 		// Stale-node defense: reject 200 if Last-Modified is not strictly newer (providers.md §5.7).
 		if newLastModifiedStr != "" {
 			newLM, ok := ParseHTTPDate(newLastModifiedStr)
 			if ok && !newLM.After(lastModifiedAt) {
 				slog.Warn("cdn 200 with non-newer Last-Modified; treating as 304 (suspected stale node)",
 					"received", newLastModifiedStr)
-				return FetchResult{Status: 304, ETag: etag, LastModified: lastModified}, nil
+				return FetchResult{Status: http.StatusNotModified, ETag: etag, LastModified: lastModified}, nil
 			}
 			if ok {
 				f.mu.Lock()
-				f.etag = newETag
-				f.lastModified = newLastModifiedStr
-				f.lastModifiedAt = newLM
+				f.headerETag = newETag
+				f.headerLastModified = newLastModifiedStr
+				f.storedLastModifiedAt = newLM
 				f.mu.Unlock()
 			}
 		} else {
 			f.mu.Lock()
-			f.etag = newETag
+			f.headerETag = newETag
 			f.mu.Unlock()
 		}
 

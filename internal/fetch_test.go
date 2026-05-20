@@ -98,8 +98,8 @@ func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 	f := makeFetcher(srv)
 	storedTime, _ := ParseHTTPDate("Thu, 01 Jan 2026 00:00:00 GMT")
 	f.mu.Lock()
-	f.lastModifiedAt = storedTime
-	f.lastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
+	f.storedLastModifiedAt = storedTime
+	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
 	f.mu.Unlock()
 
 	result, err := f.Fetch(context.Background())
@@ -118,8 +118,8 @@ func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 
 	f := makeFetcher(srv)
 	f.mu.Lock()
-	f.etag = `"xyz"`
-	f.lastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
+	f.headerETag = `"xyz"`
+	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
 	f.mu.Unlock()
 
 	_, _ = f.Fetch(context.Background())
