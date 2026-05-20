@@ -46,6 +46,8 @@ type DynatraceProvider struct {
 	pollInterval time.Duration
 	gracePeriod  time.Duration
 
+	maxRetryAttempts int
+
 	mu           sync.RWMutex
 	state        openfeature.State
 	graceTimer   *time.Timer
@@ -82,6 +84,11 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
 }
 
+// WithMaxRetryAttempts overrides the CDN fetch retry count. Not user-configurable; exposed for testing.
+func WithMaxRetryAttempts(n int) ProviderOption {
+	return func(p *DynatraceProvider) { p.maxRetryAttempts = n }
+}
+
 // NewProvider creates a DynatraceProvider for the given SDK key.
 // The key is validated immediately; an error is returned if the format is invalid.
 func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, error) {
@@ -105,8 +112,19 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	if err != nil {
 		return nil, err
 	}
+	// Only validate when using the default HTTP client; a custom client implies
+	// the caller controls the timeout (e.g. tests with a local httptest server).
+	if p.httpClient == nil && p.pollInterval <= internal.RequestTimeout {
+		return nil, fmt.Errorf(
+			"pollInterval (%s) must be greater than the request timeout (%s)",
+			p.pollInterval, internal.RequestTimeout,
+		)
+	}
 	p.config = cfg
 	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
+	if p.maxRetryAttempts > 0 {
+		p.fetcher.Retry.MaxAttempts = p.maxRetryAttempts
+	}
 	return p, nil
 }
 
@@ -122,7 +140,7 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook { return nil }
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
-	result, fetchErr := p.fetcher.Fetch()
+	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
 		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
 	}

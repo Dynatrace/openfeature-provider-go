@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,9 +30,11 @@ func (r FetchResult) IsRateLimited() bool { return r.Status == 429 }
 func (r FetchResult) IsSuccess() bool     { return r.Status >= 200 && r.Status < 300 }
 
 // CDNFetcher performs conditional HTTP GETs against the Dynatrace CDN.
+// The fetchMu guards state mutation against concurrent callers (e.g. a future
+// SSE-triggered re-fetch racing the polling path).
 type CDNFetcher struct {
 	cdnURL string
-	retry  *RetryStrategy
+	Retry  *RetryStrategy
 	client *http.Client
 	clock  func() time.Time
 
@@ -50,7 +53,7 @@ func NewCDNFetcher(cdnURL string, client *http.Client) *CDNFetcher {
 	}
 	return &CDNFetcher{
 		cdnURL: cdnURL,
-		retry:  NewRetryStrategy(),
+		Retry:  NewRetryStrategy(),
 		client: client,
 		clock:  time.Now,
 	}
@@ -62,7 +65,8 @@ func (f *CDNFetcher) IsRateLimited() bool {
 	return f.clock().Before(f.rateLimitedUntil)
 }
 
-func (f *CDNFetcher) Fetch() (FetchResult, error) {
+// Fetch performs a conditional GET with retry. Respects ctx cancellation.
+func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 	if f.IsRateLimited() {
 		slog.Debug("rate limited; skipping cdn fetch")
 		return FetchResult{Status: 429}, nil
@@ -72,17 +76,17 @@ func (f *CDNFetcher) Fetch() (FetchResult, error) {
 		return FetchResult{Status: 304}, nil
 	}
 	defer f.fetchMu.Unlock()
-	return f.retry.Execute(f.doFetch)
+	return f.Retry.Execute(ctx, f.doFetch)
 }
 
-func (f *CDNFetcher) doFetch() (FetchResult, error) {
+func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 	f.mu.Lock()
 	etag := f.etag
 	lastModified := f.lastModified
 	lastModifiedAt := f.lastModifiedAt
 	f.mu.Unlock()
 
-	req, err := http.NewRequest(http.MethodGet, f.cdnURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.cdnURL, nil)
 	if err != nil {
 		return FetchResult{}, fmt.Errorf("building cdn request: %w", err)
 	}

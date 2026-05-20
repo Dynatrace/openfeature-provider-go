@@ -1,15 +1,16 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"time"
 )
 
 const (
-	RetryMaxAttempts    = 5
-	RetryBaseDelayMS    = 100.0
-	RetryMultiplier     = 2.0
+	RetryMaxAttempts     = 5
+	RetryBaseDelayMS     = 100.0
+	RetryMultiplier      = 2.0
 	RetryMaxJitterFactor = 0.20
 )
 
@@ -39,13 +40,19 @@ func ShouldRetry(status int) bool {
 	return status >= 500 && status < 600
 }
 
-func (r *RetryStrategy) Execute(fn func() (FetchResult, error)) (FetchResult, error) {
+// Execute calls fn with retry on 5xx or network error.
+// Respects ctx cancellation between attempts — a cancelled context stops retrying immediately.
+func (r *RetryStrategy) Execute(ctx context.Context, fn func(context.Context) (FetchResult, error)) (FetchResult, error) {
 	var lastErr error
 	var lastResult FetchResult
 	delayMS := r.BaseDelayMS
 
 	for attempt := 1; attempt <= r.MaxAttempts; attempt++ {
-		result, err := fn()
+		if ctx.Err() != nil {
+			return FetchResult{}, ctx.Err()
+		}
+
+		result, err := fn(ctx)
 		if err != nil {
 			lastErr = err
 		} else {
@@ -58,7 +65,14 @@ func (r *RetryStrategy) Execute(fn func() (FetchResult, error)) (FetchResult, er
 
 		if attempt < r.MaxAttempts {
 			jitter := delayMS * r.Rng.Float64() * r.MaxJitterFactor
-			r.Sleep(time.Duration(delayMS+jitter) * time.Millisecond)
+			delay := time.Duration(delayMS+jitter) * time.Millisecond
+			done := make(chan struct{})
+			go func() { r.Sleep(delay); close(done) }()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return FetchResult{}, ctx.Err()
+			}
 			delayMS *= r.Multiplier
 		}
 	}

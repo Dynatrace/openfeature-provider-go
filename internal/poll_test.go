@@ -1,17 +1,21 @@
 package internal
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func noFetch(_ context.Context) (FetchResult, error) { return FetchResult{Status: 304}, nil }
 
 func TestPollingManager_NotModified(t *testing.T) {
 	var successCalls int32
 	pm := NewPollingManager(
-		func() (FetchResult, error) { return FetchResult{Status: 304}, nil },
+		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 304}, nil },
 		func(string) ([]string, error) { return nil, nil },
 		func([]string) { t.Error("emitChange should not be called on 304") },
 		func() { atomic.AddInt32(&successCalls, 1) },
@@ -27,7 +31,9 @@ func TestPollingManager_NotModified(t *testing.T) {
 func TestPollingManager_Success_EmitsChangeAndSuccess(t *testing.T) {
 	var changeCalls, successCalls int32
 	pm := NewPollingManager(
-		func() (FetchResult, error) { return FetchResult{Status: 200, Body: `{"flags":{}}`}, nil },
+		func(_ context.Context) (FetchResult, error) {
+			return FetchResult{Status: 200, Body: `{"flags":{}}`}, nil
+		},
 		func(string) ([]string, error) { return nil, nil },
 		func([]string) { atomic.AddInt32(&changeCalls, 1) },
 		func() { atomic.AddInt32(&successCalls, 1) },
@@ -44,7 +50,7 @@ func TestPollingManager_Success_EmitsChangeAndSuccess(t *testing.T) {
 func TestPollingManager_RateLimited_Silent(t *testing.T) {
 	var failureCalls int32
 	pm := NewPollingManager(
-		func() (FetchResult, error) { return FetchResult{Status: 429}, nil },
+		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 429}, nil },
 		func(string) ([]string, error) { return nil, nil },
 		func([]string) {}, func() {},
 		func(string) { atomic.AddInt32(&failureCalls, 1) },
@@ -59,7 +65,7 @@ func TestPollingManager_RateLimited_Silent(t *testing.T) {
 func TestPollingManager_NonSuccess_EmitsFailure(t *testing.T) {
 	var failureCalls int32
 	pm := NewPollingManager(
-		func() (FetchResult, error) { return FetchResult{Status: 503}, nil },
+		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 503}, nil },
 		func(string) ([]string, error) { return nil, nil },
 		func([]string) {},
 		func() { t.Error("emitSuccess should not be called on 503") },
@@ -73,13 +79,40 @@ func TestPollingManager_NonSuccess_EmitsFailure(t *testing.T) {
 }
 
 func TestPollingManager_Stop_Idempotent(t *testing.T) {
-	pm := NewPollingManager(
-		func() (FetchResult, error) { return FetchResult{Status: 304}, nil },
-		func(string) ([]string, error) { return nil, nil },
-		func([]string) {}, func() {}, func(string) {},
-		100*time.Millisecond,
-	)
+	pm := NewPollingManager(noFetch, func(string) ([]string, error) { return nil, nil },
+		func([]string) {}, func() {}, func(string) {}, 100*time.Millisecond)
 	pm.Start()
 	pm.Stop()
 	pm.Stop()
 }
+
+func TestPollingManager_StopInterruptsInFlightPoll(t *testing.T) {
+	// Stop() must cancel an in-flight HTTP request immediately via context cancellation.
+	started := make(chan struct{})
+	done := make(chan struct{})
+	pm := NewPollingManager(
+		func(ctx context.Context) (FetchResult, error) {
+			close(started)
+			<-ctx.Done()
+			return FetchResult{}, ctx.Err()
+		},
+		func(string) ([]string, error) { return nil, nil },
+		func([]string) {}, func() {}, func(string) {},
+		10*time.Millisecond,
+	)
+	pm.Start()
+	<-started
+	go func() { pm.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop() did not return within 500ms")
+	}
+}
+
+func TestPollingManager_PollIntervalValidation(t *testing.T) {
+	require.Greater(t, defaultPollIntervalForTest, RequestTimeout,
+		"default poll interval must exceed request timeout")
+}
+
+const defaultPollIntervalForTest = 10 * time.Second
