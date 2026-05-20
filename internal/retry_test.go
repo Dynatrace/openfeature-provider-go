@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"testing"
@@ -26,7 +27,7 @@ func seededRetry() *RetryStrategy {
 func TestRetry_SuccessFirstAttempt(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		calls++
 		return FetchResult{Status: 200, Body: "ok"}, nil
 	})
@@ -38,7 +39,7 @@ func TestRetry_SuccessFirstAttempt(t *testing.T) {
 func TestRetry_RetriesOn5xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		calls++
 		if calls < 3 {
 			return FetchResult{Status: 503}, nil
@@ -53,7 +54,7 @@ func TestRetry_RetriesOn5xx(t *testing.T) {
 func TestRetry_NoRetryOn4xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		calls++
 		return FetchResult{Status: 404}, nil
 	})
@@ -65,7 +66,7 @@ func TestRetry_NoRetryOn4xx(t *testing.T) {
 func TestRetry_ExhaustsAttempts(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	_, err := r.Execute(func() (FetchResult, error) {
+	_, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		calls++
 		return FetchResult{}, errors.New("network error")
 	})
@@ -76,7 +77,7 @@ func TestRetry_ExhaustsAttempts(t *testing.T) {
 func TestRetry_ExhaustsOn5xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	_, err := r.Execute(func() (FetchResult, error) {
+	_, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		calls++
 		return FetchResult{Status: 500}, nil
 	})
@@ -90,7 +91,7 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	r.Sleep = func(d time.Duration) { delays = append(delays, d) }
 	r.Rng = rand.New(rand.NewSource(0))
 
-	_, _ = r.Execute(func() (FetchResult, error) {
+	_, _ = r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		return FetchResult{Status: 500}, nil
 	})
 
@@ -98,6 +99,25 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	for i := 1; i < len(delays); i++ {
 		assert.Greater(t, delays[i], delays[i-1])
 	}
+}
+
+func TestRetry_ContextCancelledDuringSleep(t *testing.T) {
+	r := seededRetry()
+	r.Sleep = time.Sleep // use real sleep so cancellation works
+	r.Rng = rand.New(rand.NewSource(0)) //nolint:gosec
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	_, err := r.Execute(ctx, func(_ context.Context) (FetchResult, error) {
+		calls++
+		return FetchResult{Status: 500}, nil // always fail → triggers retry sleep
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Less(t, calls, RetryMaxAttempts, "should stop retrying when context is cancelled")
 }
 
 func TestShouldRetry(t *testing.T) {
