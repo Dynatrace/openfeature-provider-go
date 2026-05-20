@@ -78,7 +78,7 @@ func (r *RetryStrategy) Execute(ctx context.Context, fn func(context.Context) (F
 	}
 
 	if lastErr != nil {
-		return FetchResult{}, lastErr
+		return lastResult, lastErr
 	}
 	return lastResult, nil
 }

@@ -13,7 +13,7 @@ import (
 // Usage:
 //
 //	DT_SDK_KEY=dt01.server_... \
-//	DT_CDN_BASE_URL=https://cdn.eu.fm.dynatracelabs.com/server/ \  # optional; omit for prod
+//	DT_CDN_BASE_URL=https://cdn.eu.fm.dynatracelabs.com/server/ \
 //	DT_TARGETING_KEY=my-user \
 //	DT_EMAIL=me@dynatrace.com \
 //	go run ./examples

@@ -21,10 +21,6 @@ func (c providerConfig) publicKey() string {
 	return publicKeySegment(c.sdkKey)
 }
 
-func (c providerConfig) cdnurl() string {
-	return c.cdnURL
-}
-
 // parseSDKKey validates the key and derives the CDN URL.
 // cdnBaseURL may be empty (derive from key) or a full base URL override.
 func parseSDKKey(key string, cdnBaseURL string) (providerConfig, error) {
