@@ -41,7 +41,7 @@ type DynatraceProvider struct {
 	fetcher      *internal.CDNFetcher
 	poller       *internal.PollingManager
 	httpClient   *http.Client
-	cdnBaseURL   string
+	configOrigin string
 	events       chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
@@ -55,11 +55,11 @@ type DynatraceProvider struct {
 // ProviderOption configures a DynatraceProvider.
 type ProviderOption func(*DynatraceProvider)
 
-// WithCDNBaseURL overrides the CDN base URL. For dev/labs environments.
-// A trailing slash is appended automatically if missing.
+// WithConfigOrigin overrides the config origin (scheme, host, and port). For dev/labs environments.
+// The platform and key path segments are appended automatically.
 // Production URL is derived automatically from the SDK key.
-func WithCDNBaseURL(base string) ProviderOption {
-	return func(p *DynatraceProvider) { p.cdnBaseURL = base }
+func WithConfigOrigin(origin string) ProviderOption {
+	return func(p *DynatraceProvider) { p.configOrigin = origin }
 }
 
 // WithHTTPClient injects a custom HTTP client (e.g. a test server client).
@@ -96,7 +96,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		opt(p)
 	}
 
-	cfg, err := parseSDKKey(sdkKey, p.cdnBaseURL)
+	cfg, err := parseSDKKey(sdkKey, p.configOrigin)
 	if err != nil {
 		return nil, err
 	}

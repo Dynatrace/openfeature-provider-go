@@ -66,14 +66,14 @@ func TestParseSDKKey_GeoVariants(t *testing.T) {
 	}
 }
 
-func TestParseSDKKey_WithCDNBaseURL(t *testing.T) {
-	cases := []struct{ base string }{
-		{"https://cdn.us.fm.dynatracelabs.com/server"},
-		{"https://cdn.us.fm.dynatracelabs.com/server/"},
+func TestParseSDKKey_WithConfigOrigin(t *testing.T) {
+	cases := []struct{ origin string }{
+		{"https://cdn.us.fm.dynatracelabs.com"},
+		{"https://cdn.us.fm.dynatracelabs.com/"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.base, func(t *testing.T) {
-			cfg, err := parseSDKKey(validSDKKey, tc.base)
+		t.Run(tc.origin, func(t *testing.T) {
+			cfg, err := parseSDKKey(validSDKKey, tc.origin)
 			require.NoError(t, err)
 			assert.Equal(t, "https://cdn.us.fm.dynatracelabs.com/server/"+validSDKKey+".json", cfg.cdnURL)
 		})
@@ -85,8 +85,8 @@ func TestNewProvider_InvalidKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewProvider_WithCDNBaseURL(t *testing.T) {
-	p, err := NewProvider(validSDKKey, WithCDNBaseURL("https://cdn.eu.fm.dynatracelabs.com/server/"))
+func TestNewProvider_WithConfigOrigin(t *testing.T) {
+	p, err := NewProvider(validSDKKey, WithConfigOrigin("https://cdn.eu.fm.dynatracelabs.com"))
 	require.NoError(t, err)
 	assert.Equal(t, "dynatrace", p.Metadata().Name)
 }

@@ -22,14 +22,14 @@ func (c providerConfig) publicKey() string {
 }
 
 // parseSDKKey validates the key and derives the CDN URL.
-// cdnBaseURL may be empty (derive from key) or a full base URL override.
-func parseSDKKey(key string, cdnBaseURL string) (providerConfig, error) {
+// configOrigin may be empty (derive from key) or an origin override (scheme, host, port — no path).
+func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return providerConfig{}, errors.New("sdk key must not be blank")
 	}
-	if cdnBaseURL != "" && strings.TrimSpace(cdnBaseURL) == "" {
-		return providerConfig{}, errors.New("cdn base URL must not be blank")
+	if configOrigin != "" && strings.TrimSpace(configOrigin) == "" {
+		return providerConfig{}, errors.New("config origin must not be blank")
 	}
 	m := keyPattern.FindStringSubmatch(key)
 	if m == nil {
@@ -42,11 +42,9 @@ func parseSDKKey(key string, cdnBaseURL string) (providerConfig, error) {
 	platform := m[2]
 
 	var cdnURL string
-	if cdnBaseURL != "" {
-		if !strings.HasSuffix(cdnBaseURL, "/") {
-			cdnBaseURL += "/"
-		}
-		cdnURL = cdnBaseURL + key + ".json"
+	if configOrigin != "" {
+		origin := strings.TrimRight(configOrigin, "/")
+		cdnURL = origin + "/" + platform + "/" + key + ".json"
 	} else {
 		cdnURL = "https://cdn." + geo + ".fm.dynatrace.com/" + platform + "/" + key + ".json"
 	}
