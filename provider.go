@@ -162,11 +162,6 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	p.state = openfeature.ReadyState
 	p.mu.Unlock()
 
-	p.sendEvent(openfeature.Event{
-		ProviderName: providerName,
-		EventType:    openfeature.ProviderReady,
-	})
-
 	p.poller = internal.NewPollingManager(
 		p.fetcher.Fetch,
 		p.storeFlags,

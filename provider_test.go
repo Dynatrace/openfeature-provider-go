@@ -63,12 +63,9 @@ func TestProvider_Init_Success(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	select {
-	case e := <-p.EventChannel():
-		assert.Equal(t, openfeature.ProviderReady, e.EventType)
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for ProviderReady event")
-	}
+	// PROVIDER_READY is synthesized by the SDK after Init returns; the provider
+	// does not emit it on the channel (matching Java provider behaviour).
+	assert.True(t, p.isReady())
 }
 
 func TestProvider_Init_Failure_Non2xx(t *testing.T) {
@@ -98,7 +95,6 @@ func TestProvider_BooleanEvaluation_AfterInit(t *testing.T) {
 	p := newTestProvider(t, srv)
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
-	<-p.EventChannel()
 
 	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
 }
