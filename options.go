@@ -80,9 +80,12 @@ func (o Options) CDNURL() string {
 }
 
 func publicKeySegment(key string) string {
-	idx := strings.LastIndex(key, ".")
-	if idx <= 0 {
+	// Only trust the structure if the key has exactly two dots (expected format).
+	// For anything else, redact entirely to avoid leaking an unknown private segment.
+	first := strings.Index(key, ".")
+	last := strings.LastIndex(key, ".")
+	if first <= 0 || first == last {
 		return "<redacted>"
 	}
-	return key[:idx]
+	return key[:last]
 }
