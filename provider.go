@@ -318,6 +318,7 @@ func (p *DynatraceProvider) isReady() bool {
 }
 
 func (p *DynatraceProvider) sendEvent(e openfeature.Event) {
+	defer func() { _ = recover() }()
 	select {
 	case p.events <- e:
 	default:
