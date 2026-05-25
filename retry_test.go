@@ -112,7 +112,7 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	r := seededRetry()
 	var delays []time.Duration
 	r.sleep = func(d time.Duration) { delays = append(delays, d) }
-	r.rng = rand.New(rand.NewSource(0)) // zero jitter seed
+	r.rng = rand.New(rand.NewSource(0)) // deterministic jitter
 
 	calls := 0
 	_, _ = r.Execute(func() (fetchResult, error) {
