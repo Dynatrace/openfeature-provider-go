@@ -14,8 +14,9 @@ var keyPattern = regexp.MustCompile(
 
 // Options holds validated provider configuration derived from the SDK key.
 type Options struct {
-	sdkKey     string
-	cdnURL     string
+	sdkKey string
+	cdnURL string
+	optErr error
 }
 
 // Option is a functional option for Options.
@@ -25,6 +26,10 @@ type Option func(*Options)
 // A trailing slash is appended automatically if missing.
 func WithCDNBaseURL(base string) Option {
 	return func(o *Options) {
+		if strings.TrimSpace(base) == "" {
+			o.optErr = errors.New("WithCDNBaseURL: base URL must not be blank")
+			return
+		}
 		if !strings.HasSuffix(base, "/") {
 			base += "/"
 		}
@@ -56,6 +61,9 @@ func FromSDKKey(key string, opts ...Option) (Options, error) {
 	}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if o.optErr != nil {
+		return Options{}, o.optErr
 	}
 	return o, nil
 }

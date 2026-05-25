@@ -102,6 +102,16 @@ func TestFromSDKKey_WithCDNBaseURL(t *testing.T) {
 	}
 }
 
+func TestFromSDKKey_WithCDNBaseURL_Blank(t *testing.T) {
+	key := "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
+	for _, base := range []string{"", "   "} {
+		_, err := FromSDKKey(key, WithCDNBaseURL(base))
+		if err == nil {
+			t.Errorf("expected error for blank base URL %q", base)
+		}
+	}
+}
+
 func TestFromSDKKey_WithCDNBaseURL_TrailingSlash(t *testing.T) {
 	key := "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
 	opts, err := FromSDKKey(key, WithCDNBaseURL("https://cdn.us.fm.dynatracelabs.com/server/"))
