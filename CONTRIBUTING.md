@@ -28,7 +28,7 @@ PR titles must follow the format: `type: description` (e.g., `feat: add SSE supp
 The provider wraps `flagd-core` (`github.com/open-feature/flagd/core`) for in-process evaluation
 and adds HTTP config fetching, polling, retry, and OpenFeature lifecycle management.
 
-See `~/git/Dynatrace/fm-knowledge-base/docs/product/architecture/providers.md` for the authoritative spec.
+See [fm-knowledge-base: providers.md](https://github.com/Dynatrace/fm-knowledge-base/blob/main/docs/product/architecture/providers.md) for the authoritative spec.
 
 | File | Purpose |
 |------|---------|
