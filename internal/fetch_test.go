@@ -127,11 +127,11 @@ func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 }
 
 func TestParseRetryAfterDuration_Seconds(t *testing.T) {
-	assert.Equal(t, 30*time.Second, ParseRetryAfterDuration("30"))
+	assert.Equal(t, 30*time.Second, ParseRetryAfterDuration("30", time.Now()))
 }
 
 func TestParseRetryAfterDuration_Empty(t *testing.T) {
-	assert.Equal(t, DefaultRetryAfterMS*time.Millisecond, ParseRetryAfterDuration(""))
+	assert.Equal(t, DefaultRetryAfterMS*time.Millisecond, ParseRetryAfterDuration("", time.Now()))
 }
 
 func TestFetchResult_Predicates(t *testing.T) {
