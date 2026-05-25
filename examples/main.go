@@ -27,5 +27,7 @@ func main() {
 		log.Printf("evaluation error: %v", err)
 	}
 	fmt.Printf("my-flag = %v\n", value)
-	openfeature.Shutdown()
+	if err := openfeature.Shutdown(); err != nil {
+		log.Printf("shutdown error: %v", err)
+	}
 }
