@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const minPollInterval = time.Millisecond
+
 // PollingManager drives periodic flag-config polling.
 type PollingManager struct {
 	fetchFlags  func() (FetchResult, error)
@@ -28,6 +30,9 @@ func NewPollingManager(
 	emitFailure func(string),
 	interval time.Duration,
 ) *PollingManager {
+	if interval < minPollInterval {
+		interval = minPollInterval
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &PollingManager{
 		fetchFlags:  fetchFlags,
