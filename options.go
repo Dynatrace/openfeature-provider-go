@@ -3,6 +3,7 @@ package dynatrace
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -28,8 +29,15 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	if key == "" {
 		return providerConfig{}, errors.New("sdk key must not be blank")
 	}
-	if configOrigin != "" && strings.TrimSpace(configOrigin) == "" {
-		return providerConfig{}, errors.New("config origin must not be blank")
+	configOrigin = strings.TrimSpace(configOrigin)
+	if configOrigin != "" {
+		u, err := url.Parse(configOrigin)
+		if err != nil {
+			return providerConfig{}, fmt.Errorf("config origin is not a valid URL: %w", err)
+		}
+		if p := strings.TrimRight(u.Path, "/"); p != "" {
+			return providerConfig{}, fmt.Errorf("config origin must not include a path; got %q", configOrigin)
+		}
 	}
 	m := keyPattern.FindStringSubmatch(key)
 	if m == nil {

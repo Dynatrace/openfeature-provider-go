@@ -80,6 +80,20 @@ func TestParseSDKKey_WithConfigOrigin(t *testing.T) {
 	}
 }
 
+func TestParseSDKKey_ConfigOriginWithPathRejected(t *testing.T) {
+	cases := []string{
+		"https://cdn.us.fm.dynatracelabs.com/server",
+		"https://cdn.us.fm.dynatracelabs.com/server/path",
+	}
+	for _, origin := range cases {
+		t.Run(origin, func(t *testing.T) {
+			_, err := parseSDKKey(validSDKKey, origin)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "path")
+		})
+	}
+}
+
 func TestNewProvider_InvalidKey(t *testing.T) {
 	_, err := NewProvider("not-a-valid-key")
 	require.Error(t, err)

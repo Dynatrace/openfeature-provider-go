@@ -75,7 +75,7 @@ Use `options.PublicKey()` for logging — it strips the private segment.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithCDNBaseURL(url)` | derived from key | Override CDN base URL for dev/labs environments |
+| `WithConfigOrigin(origin)` | derived from key | Override config origin (scheme, host, port — no path) for dev/labs environments |
 
 ### Polling and Grace Period
 
