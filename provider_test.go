@@ -43,7 +43,7 @@ func newTestProvider(t *testing.T, srv *httptest.Server) *DynatraceProvider {
 	p, err := NewProvider(validSDKKey,
 		WithCDNBaseURL(srv.URL+"/"),
 		WithHTTPClient(srv.Client()),
-		WithPollInterval(500*time.Millisecond),
+		withPollInterval(500*time.Millisecond),
 	)
 	require.NoError(t, err)
 	return p
