@@ -114,7 +114,7 @@ func (pm *PollingManager) poll(ctx context.Context) {
 	}
 
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			slog.Debug("poll: cancelled; discarding result")
 			return
 		}
