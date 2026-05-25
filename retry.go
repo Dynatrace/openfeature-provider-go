@@ -78,8 +78,5 @@ func (r *RetryStrategy) Execute(fn func() (FetchResult, error)) (FetchResult, er
 		}
 	}
 
-	if lastErr != nil {
-		return FetchResult{}, lastErr
-	}
-	return lastResult, nil
+	return lastResult, lastErr
 }
