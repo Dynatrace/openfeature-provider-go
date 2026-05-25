@@ -98,7 +98,6 @@ func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 	storedTime, _ := ParseHTTPDate("Thu, 01 Jan 2026 00:00:00 GMT")
 	f.mu.Lock()
 	f.lastModifiedAt = storedTime
-	f.hasLastModified = true
 	f.lastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
 	f.mu.Unlock()
 

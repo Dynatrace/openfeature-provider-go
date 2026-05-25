@@ -35,11 +35,10 @@ type CDNFetcher struct {
 	client *http.Client
 	clock  func() time.Time
 
-	mu              sync.Mutex
-	etag            string
-	lastModified    string
-	lastModifiedAt  time.Time
-	hasLastModified bool
+	mu               sync.Mutex
+	etag             string
+	lastModified     string
+	lastModifiedAt   time.Time
 	rateLimitedUntil time.Time
 
 	fetchMu sync.Mutex
@@ -81,7 +80,6 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 	etag := f.etag
 	lastModified := f.lastModified
 	lastModifiedAt := f.lastModifiedAt
-	hasLastModified := f.hasLastModified
 	f.mu.Unlock()
 
 	req, err := http.NewRequest(http.MethodGet, f.cdnURL, nil)
@@ -126,7 +124,7 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 		// Stale-node defense: reject 200 if Last-Modified is not strictly newer (providers.md §5.7).
 		if newLastModifiedStr != "" {
 			newLM, ok := ParseHTTPDate(newLastModifiedStr)
-			if ok && hasLastModified && !newLM.After(lastModifiedAt) {
+			if ok && !newLM.After(lastModifiedAt) {
 				slog.Warn("cdn 200 with non-newer Last-Modified; treating as 304 (suspected stale node)",
 					"received", newLastModifiedStr)
 				return FetchResult{Status: 304, ETag: etag, LastModified: lastModified}, nil
@@ -136,7 +134,6 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 				f.etag = newETag
 				f.lastModified = newLastModifiedStr
 				f.lastModifiedAt = newLM
-				f.hasLastModified = true
 				f.mu.Unlock()
 			}
 		} else {
