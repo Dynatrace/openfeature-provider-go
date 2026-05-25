@@ -109,7 +109,7 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 	}
 
 	if status == 429 {
-		delay := ParseRetryAfterDuration(resp.Header.Get("Retry-After"))
+		delay := ParseRetryAfterDuration(resp.Header.Get("Retry-After"), f.clock())
 		f.mu.Lock()
 		f.rateLimitedUntil = f.clock().Add(delay)
 		f.mu.Unlock()
@@ -152,7 +152,7 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 	return FetchResult{Status: status}, nil
 }
 
-func ParseRetryAfterDuration(header string) time.Duration {
+func ParseRetryAfterDuration(header string, now time.Time) time.Duration {
 	header = strings.TrimSpace(header)
 	if header == "" {
 		return DefaultRetryAfterMS * time.Millisecond
@@ -161,7 +161,7 @@ func ParseRetryAfterDuration(header string) time.Duration {
 		return time.Duration(secs) * time.Second
 	}
 	if t, ok := ParseHTTPDate(header); ok {
-		d := time.Until(t)
+		d := t.Sub(now)
 		if d < 0 {
 			return 0
 		}
