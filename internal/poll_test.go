@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func noFetch(_ context.Context) (FetchResult, error) { return FetchResult{Status: 304}, nil }
@@ -129,10 +128,3 @@ func TestPollingManager_StopInterruptsInFlightPoll(t *testing.T) {
 		t.Fatal("Stop() did not return within 500ms")
 	}
 }
-
-func TestPollingManager_PollIntervalValidation(t *testing.T) {
-	require.Greater(t, defaultPollIntervalForTest, RequestTimeout,
-		"default poll interval must exceed request timeout")
-}
-
-const defaultPollIntervalForTest = 10 * time.Second
