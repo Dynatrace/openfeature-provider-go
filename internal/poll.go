@@ -154,5 +154,7 @@ func (pm *PollingManager) poll(ctx context.Context) {
 	}
 
 	pm.emitSuccess()
-	pm.emitChange(changedKeys)
+	if len(changedKeys) > 0 {
+		pm.emitChange(changedKeys)
+	}
 }

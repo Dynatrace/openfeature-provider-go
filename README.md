@@ -39,12 +39,12 @@ import (
 )
 
 func main() {
-    options, err := dynatrace.FromSDKKey(os.Getenv("DT_SDK_KEY"))
+    provider, err := dynatrace.NewProvider(os.Getenv("DT_SDK_KEY"))
     if err != nil {
         panic(err)
     }
 
-    openfeature.SetProvider(dynatrace.NewProvider(options))
+    openfeature.SetProviderAndWait(provider)
 
     client := openfeature.NewClient("my-app")
     value, _ := client.BooleanValue(
