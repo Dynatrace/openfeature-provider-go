@@ -69,13 +69,13 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 	return func(p *DynatraceProvider) { p.httpClient = c }
 }
 
-// WithPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
-func WithPollInterval(d time.Duration) ProviderOption {
+// withPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
+func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.pollInterval = d }
 }
 
-// WithGracePeriod overrides the STALE→ERROR grace period. Not user-configurable per spec; exposed for testing.
-func WithGracePeriod(d time.Duration) ProviderOption {
+// withGracePeriod overrides the STALE→ERROR grace period. Not user-configurable per spec; exposed for testing.
+func withGracePeriod(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.gracePeriod = d }
 }
 
@@ -84,8 +84,8 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
 }
 
-// WithMaxRetryAttempts overrides the CDN fetch retry count. Not user-configurable; exposed for testing.
-func WithMaxRetryAttempts(n int) ProviderOption {
+// withMaxRetryAttempts overrides the CDN fetch retry count. Not user-configurable; exposed for testing.
+func withMaxRetryAttempts(n int) ProviderOption {
 	return func(p *DynatraceProvider) { p.maxRetryAttempts = n }
 }
 
