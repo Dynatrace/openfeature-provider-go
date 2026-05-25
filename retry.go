@@ -6,17 +6,17 @@ import (
 	"time"
 )
 
-// FetchResult holds the outcome of a CDN fetch attempt.
-type FetchResult struct {
+// fetchResult holds the outcome of a CDN fetch attempt.
+type fetchResult struct {
 	Status       int
 	Body         string
 	ETag         string
 	LastModified string
 }
 
-func (r FetchResult) IsNotModified() bool { return r.Status == 304 }
-func (r FetchResult) IsRateLimited() bool { return r.Status == 429 }
-func (r FetchResult) IsSuccess() bool     { return r.Status >= 200 && r.Status < 300 }
+func (r fetchResult) IsNotModified() bool { return r.Status == 304 }
+func (r fetchResult) IsRateLimited() bool { return r.Status == 429 }
+func (r fetchResult) IsSuccess() bool     { return r.Status >= 200 && r.Status < 300 }
 
 
 const (
@@ -26,9 +26,9 @@ const (
 	retryMaxJitterFactor = 0.20
 )
 
-// RetryStrategy applies exponential backoff with jitter for transient HTTP failures.
+// retryStrategy applies exponential backoff with jitter for transient HTTP failures.
 // Retries on 5xx and network errors. Does not retry 4xx (429 is handled by CDNFetcher).
-type RetryStrategy struct {
+type retryStrategy struct {
 	maxAttempts     int
 	baseDelayMS     float64
 	multiplier      float64
@@ -37,8 +37,8 @@ type RetryStrategy struct {
 	rng             *rand.Rand
 }
 
-func newRetryStrategy() *RetryStrategy {
-	return &RetryStrategy{
+func newretryStrategy() *retryStrategy {
+	return &retryStrategy{
 		maxAttempts:     retryMaxAttempts,
 		baseDelayMS:     retryBaseDelayMS,
 		multiplier:      retryMultiplier,
@@ -48,15 +48,15 @@ func newRetryStrategy() *RetryStrategy {
 	}
 }
 
-// ShouldRetry returns true for 5xx responses.
-func ShouldRetry(status int) bool {
+// shouldRetry returns true for 5xx responses.
+func shouldRetry(status int) bool {
 	return status >= 500 && status < 600
 }
 
 // Execute calls fn with retry on 5xx or network error.
-func (r *RetryStrategy) Execute(fn func() (FetchResult, error)) (FetchResult, error) {
+func (r *retryStrategy) Execute(fn func() (fetchResult, error)) (fetchResult, error) {
 	var lastErr error
-	var lastResult FetchResult
+	var lastResult fetchResult
 	delayMS := r.baseDelayMS
 
 	for attempt := 1; attempt <= r.maxAttempts; attempt++ {
@@ -65,7 +65,7 @@ func (r *RetryStrategy) Execute(fn func() (FetchResult, error)) (FetchResult, er
 			lastErr = err
 		} else {
 			lastResult = result
-			if !ShouldRetry(result.Status) {
+			if !shouldRetry(result.Status) {
 				return result, nil
 			}
 			lastErr = fmt.Errorf("HTTP %d", result.Status)

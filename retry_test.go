@@ -9,8 +9,8 @@ import (
 
 func noopSleep(_ time.Duration) {}
 
-func seededRetry() *RetryStrategy {
-	return &RetryStrategy{
+func seededRetry() *retryStrategy {
+	return &retryStrategy{
 		maxAttempts:     retryMaxAttempts,
 		baseDelayMS:     retryBaseDelayMS,
 		multiplier:      retryMultiplier,
@@ -23,9 +23,9 @@ func seededRetry() *RetryStrategy {
 func TestRetry_SuccessFirstAttempt(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(func() (fetchResult, error) {
 		calls++
-		return FetchResult{Status: 200, Body: "ok"}, nil
+		return fetchResult{Status: 200, Body: "ok"}, nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -41,12 +41,12 @@ func TestRetry_SuccessFirstAttempt(t *testing.T) {
 func TestRetry_RetriesOn5xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(func() (fetchResult, error) {
 		calls++
 		if calls < 3 {
-			return FetchResult{Status: 503}, nil
+			return fetchResult{Status: 503}, nil
 		}
-		return FetchResult{Status: 200, Body: "ok"}, nil
+		return fetchResult{Status: 200, Body: "ok"}, nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -62,9 +62,9 @@ func TestRetry_RetriesOn5xx(t *testing.T) {
 func TestRetry_NoRetryOn4xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(func() (fetchResult, error) {
 		calls++
-		return FetchResult{Status: 404}, nil
+		return fetchResult{Status: 404}, nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -80,9 +80,9 @@ func TestRetry_NoRetryOn4xx(t *testing.T) {
 func TestRetry_ExhaustsAttempts(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	_, err := r.Execute(func() (FetchResult, error) {
+	_, err := r.Execute(func() (fetchResult, error) {
 		calls++
-		return FetchResult{}, errors.New("network error")
+		return fetchResult{}, errors.New("network error")
 	})
 	if err == nil {
 		t.Fatal("expected error after exhausted attempts")
@@ -95,9 +95,9 @@ func TestRetry_ExhaustsAttempts(t *testing.T) {
 func TestRetry_ExhaustsOn5xx(t *testing.T) {
 	r := seededRetry()
 	calls := 0
-	result, err := r.Execute(func() (FetchResult, error) {
+	result, err := r.Execute(func() (fetchResult, error) {
 		calls++
-		return FetchResult{Status: 500}, nil
+		return fetchResult{Status: 500}, nil
 	})
 	if err == nil {
 		t.Fatal("expected error after exhausted 5xx attempts")
@@ -115,9 +115,9 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	r.rng = rand.New(rand.NewSource(0)) // zero jitter seed
 
 	calls := 0
-	_, _ = r.Execute(func() (FetchResult, error) {
+	_, _ = r.Execute(func() (fetchResult, error) {
 		calls++
-		return FetchResult{Status: 500}, nil
+		return fetchResult{Status: 500}, nil
 	})
 
 	// With seed 0 and MAX_JITTER=0.20, jitter should be positive
@@ -149,8 +149,8 @@ func TestShouldRetry(t *testing.T) {
 		{600, false},
 	}
 	for _, tc := range cases {
-		if got := ShouldRetry(tc.status); got != tc.retry {
-			t.Errorf("ShouldRetry(%d) = %v, want %v", tc.status, got, tc.retry)
+		if got := shouldRetry(tc.status); got != tc.retry {
+			t.Errorf("shouldRetry(%d) = %v, want %v", tc.status, got, tc.retry)
 		}
 	}
 }
