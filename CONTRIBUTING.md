@@ -30,10 +30,17 @@ and adds HTTP config fetching, polling, retry, and OpenFeature lifecycle managem
 
 <!-- TODO: link to public provider architecture docs once available -->
 
+### Public API
+
 | File | Purpose |
-|------|---------|
-| `options.go` | SDK key validation + CDN URL derivation |
-| `retry.go` | Exponential-backoff retry strategy |
-| `fetch.go` | CDN HTTP fetcher with ETag + stale-node defense |
-| `poll.go` | Fixed-delay polling goroutine |
-| `provider.go` | OpenFeature provider + state machine + event emission |
+| --- | --- |
+| `provider.go` | `DynatraceProvider` struct, `NewProvider`, `ProviderOption` functional options |
+| `options.go` | SDK key validation and CDN URL derivation |
+
+### Internal implementation
+
+| File | Purpose |
+| --- | --- |
+| `internal/fetch.go` | CDN HTTP fetcher — ETag, Last-Modified, stale-node defense, 429 handling |
+| `internal/poll.go` | Fixed-rate polling goroutine with context-aware cancellation |
+| `internal/retry.go` | Exponential-backoff retry strategy with jitter |

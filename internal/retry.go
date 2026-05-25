@@ -42,7 +42,7 @@ func ShouldRetry(status int) bool {
 
 // Execute calls fn with retry on 5xx or network error.
 // Respects ctx cancellation between attempts — a cancelled context stops retrying immediately.
-func (r *RetryStrategy) Execute(ctx context.Context, fn func(context.Context) (FetchResult, error)) (FetchResult, error) {
+func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context) (FetchResult, error)) (FetchResult, error) {
 	var lastErr error
 	var lastResult FetchResult
 	delayMS := r.BaseDelayMS
@@ -52,7 +52,7 @@ func (r *RetryStrategy) Execute(ctx context.Context, fn func(context.Context) (F
 			return FetchResult{}, ctx.Err()
 		}
 
-		result, err := fn(ctx)
+		result, err := fetch(ctx)
 		if err != nil {
 			lastErr = err
 		} else {
