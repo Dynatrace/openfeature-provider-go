@@ -31,7 +31,7 @@ func NewRetryStrategy() *RetryStrategy {
 		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
 		Sleep:           time.Sleep,
-		Rng:             rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		Rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 

@@ -78,7 +78,7 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
 	zapLog := zap.NewNop()
 	log := logger.NewLogger(zapLog, false)
-	flagStore := store.NewFlags()
+	flagStore, _ := store.NewStore(log, nil)
 	eval := evaluator.NewJSON(log, flagStore)
 
 	p := &DynatraceProvider{

@@ -19,7 +19,7 @@ func seededRetry() *RetryStrategy {
 		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
 		Sleep:           noopSleep,
-		Rng:             rand.New(rand.NewSource(42)), //nolint:gosec
+		Rng:             rand.New(rand.NewSource(42)),
 	}
 }
 
@@ -88,7 +88,7 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	r := seededRetry()
 	var delays []time.Duration
 	r.Sleep = func(d time.Duration) { delays = append(delays, d) }
-	r.Rng = rand.New(rand.NewSource(0)) //nolint:gosec
+	r.Rng = rand.New(rand.NewSource(0))
 
 	_, _ = r.Execute(func() (FetchResult, error) {
 		return FetchResult{Status: 500}, nil
