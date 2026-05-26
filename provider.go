@@ -46,8 +46,6 @@ type DynatraceProvider struct {
 	pollInterval time.Duration
 	gracePeriod  time.Duration
 
-	maxRetryAttempts int
-
 	mu           sync.RWMutex
 	state        openfeature.State
 	graceTimer   *time.Timer
@@ -74,19 +72,9 @@ func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.pollInterval = d }
 }
 
-// withGracePeriod overrides the STALE→ERROR grace period. Not user-configurable per spec; exposed for testing.
-func withGracePeriod(d time.Duration) ProviderOption {
-	return func(p *DynatraceProvider) { p.gracePeriod = d }
-}
-
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
 func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
-}
-
-// withMaxRetryAttempts overrides the CDN fetch retry count. Not user-configurable; exposed for testing.
-func withMaxRetryAttempts(n int) ProviderOption {
-	return func(p *DynatraceProvider) { p.maxRetryAttempts = n }
 }
 
 // NewProvider creates a DynatraceProvider for the given SDK key.
@@ -122,9 +110,6 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	}
 	p.config = cfg
 	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
-	if p.maxRetryAttempts > 0 {
-		p.fetcher.Retry.MaxAttempts = p.maxRetryAttempts
-	}
 	return p, nil
 }
 
