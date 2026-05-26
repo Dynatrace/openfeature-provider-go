@@ -104,7 +104,7 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 func TestRetry_ContextCancelledDuringSleep(t *testing.T) {
 	r := seededRetry()
 	r.Sleep = time.Sleep // use real sleep so cancellation works
-	r.Rng = rand.New(rand.NewSource(0)) //nolint:gosec
+	r.Rng = rand.New(rand.NewSource(0))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
