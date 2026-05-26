@@ -37,17 +37,6 @@ type retryStrategy struct {
 	rng             *rand.Rand
 }
 
-func newretryStrategy() *retryStrategy {
-	return &retryStrategy{
-		maxAttempts:     retryMaxAttempts,
-		baseDelayMS:     retryBaseDelayMS,
-		multiplier:      retryMultiplier,
-		maxJitterFactor: retryMaxJitterFactor,
-		sleep:           time.Sleep,
-		rng:             rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
-	}
-}
-
 // shouldRetry returns true for 5xx responses.
 func shouldRetry(status int) bool {
 	return status >= 500 && status < 600
