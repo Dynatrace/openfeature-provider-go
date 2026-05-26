@@ -34,7 +34,5 @@ func main() {
 		log.Printf("evaluation error: %v", err)
 	}
 	fmt.Printf("my-flag = %v\n", value)
-	if err := openfeature.ShutdownWithContext(context.Background()); err != nil {
-		log.Printf("shutdown error: %v", err)
-	}
+	openfeature.Shutdown()
 }
