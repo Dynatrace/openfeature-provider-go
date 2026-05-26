@@ -1,6 +1,6 @@
 module github.com/Dynatrace/openfeature-provider-go
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/open-feature/flagd/core v0.15.4
