@@ -16,7 +16,6 @@ linters:
   settings:
     errcheck:
       check-type-assertions: true
-      check-blank: true
     gosec:
       excludes:
         - G404  # math/rand used intentionally for jitter (not crypto)
