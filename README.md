@@ -65,7 +65,7 @@ func main() {
 
 Obtain a Server SDK key from the Dynatrace Feature Management UI. Keys have the format:
 
-```
+```text
 dt01.server_{geo}_{rand}.{secret}_{sha}
 ```
 
@@ -86,7 +86,7 @@ Per the [provider specification](https://github.com/Dynatrace/fm-knowledge-base/
 
 ## State Machine
 
-```
+```text
 NOT_READY → READY    : successful Init
 READY → STALE        : poll failure
 STALE → READY        : successful poll (recovery)
