@@ -1,3 +1,5 @@
+version: "2"
+
 linters:
   enable:
     - copyloopvar
@@ -11,17 +13,17 @@ linters:
     - staticcheck
     - unused
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  gosec:
-    excludes:
-      - G404  # math/rand used intentionally for jitter (not crypto)
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gosec:
+      excludes:
+        - G404  # math/rand used intentionally for jitter (not crypto)
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
