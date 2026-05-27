@@ -99,7 +99,7 @@ func (f *CDNFetcher) doFetch() (FetchResult, error) {
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
 
 	status := resp.StatusCode
