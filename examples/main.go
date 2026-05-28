@@ -13,7 +13,7 @@ import (
 // Usage:
 //
 //	DT_SDK_KEY=dt01.server_... \
-//	DT_CDN_BASE_URL=https://cdn.eu.fm.dynatracelabs.com/server/ \
+//	DT_CONFIG_ORIGIN=https://cdn.eu.fm.dynatracelabs.com \
 //	DT_TARGETING_KEY=my-user \
 //	DT_EMAIL=me@dynatrace.com \
 //	go run ./examples
@@ -24,8 +24,8 @@ func main() {
 	}
 
 	var opts []dynatrace.ProviderOption
-	if base := os.Getenv("DT_CDN_BASE_URL"); base != "" {
-		opts = append(opts, dynatrace.WithCDNBaseURL(base))
+	if base := os.Getenv("DT_CONFIG_ORIGIN"); base != "" {
+		opts = append(opts, dynatrace.WithConfigOrigin(base))
 	}
 
 	provider, err := dynatrace.NewProvider(sdkKey, opts...)
