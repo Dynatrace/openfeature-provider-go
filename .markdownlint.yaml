@@ -1,0 +1,4 @@
+# Disable rules that conflict with technical documentation style
+MD013: false  # line length — code examples and URLs often exceed 80 chars
+MD033: false  # inline HTML — not used but disable for safety
+MD041: false  # first line must be h1 — CONTRIBUTING.md starts with h1, README has badges first

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,7 @@ import (
 
 func makeFetcher(server *httptest.Server) *CDNFetcher {
 	f := NewCDNFetcher(server.URL+"/flags.json", server.Client())
-	f.retry = &RetryStrategy{
+	f.Retry = &RetryStrategy{
 		MaxAttempts: 1, BaseDelayMS: 0, Multiplier: 1,
 		MaxJitterFactor: 0, Sleep: noopSleep, Rng: nil,
 	}
@@ -30,7 +31,7 @@ func TestCDNFetcher_200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := makeFetcher(srv).Fetch()
+	result, err := makeFetcher(srv).Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsSuccess())
 	assert.Equal(t, body, result.Body)
@@ -43,7 +44,7 @@ func TestCDNFetcher_304(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := makeFetcher(srv).Fetch()
+	result, err := makeFetcher(srv).Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsNotModified())
 }
@@ -59,7 +60,7 @@ func TestCDNFetcher_429_RateLimit(t *testing.T) {
 	f := makeFetcher(srv)
 	f.clock = func() time.Time { return now }
 
-	result, err := f.Fetch()
+	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsRateLimited())
 	assert.True(t, f.IsRateLimited())
@@ -79,7 +80,7 @@ func TestCDNFetcher_RateLimit_SkipsFetch(t *testing.T) {
 	f.rateLimitedUntil = time.Now().Add(10 * time.Minute)
 	f.mu.Unlock()
 
-	result, err := f.Fetch()
+	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsRateLimited())
 	assert.Equal(t, 0, calls)
@@ -97,13 +98,38 @@ func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 	f := makeFetcher(srv)
 	storedTime, _ := ParseHTTPDate("Thu, 01 Jan 2026 00:00:00 GMT")
 	f.mu.Lock()
-	f.lastModifiedAt = storedTime
-	f.lastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
+	f.storedLastModifiedAt = storedTime
+	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
 	f.mu.Unlock()
 
-	result, err := f.Fetch()
+	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsNotModified(), "stale-node defense should return 304, got %d", result.Status)
+}
+
+// TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag verifies that a 200
+// with a malformed Last-Modified header still updates the stored ETag, so the next
+// poll sends If-None-Match. Matches Java CdnFetcher.java behavior on 2xx.
+func TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"new-etag"`)
+		w.Header().Set("Last-Modified", "not-a-real-date")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"flags":{}}`)
+	}))
+	defer srv.Close()
+
+	f := makeFetcher(srv)
+	result, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+
+	f.mu.Lock()
+	gotETag := f.headerETag
+	gotLM := f.headerLastModified
+	f.mu.Unlock()
+	assert.Equal(t, `"new-etag"`, gotETag, "ETag must update even when Last-Modified is unparseable")
+	assert.Empty(t, gotLM, "Last-Modified must NOT be stored when unparseable")
 }
 
 func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
@@ -117,13 +143,37 @@ func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 
 	f := makeFetcher(srv)
 	f.mu.Lock()
-	f.etag = `"xyz"`
-	f.lastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
+	f.headerETag = `"xyz"`
+	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
 	f.mu.Unlock()
 
-	_, _ = f.Fetch()
+	_, _ = f.Fetch(context.Background())
 	assert.Equal(t, `"xyz"`, receivedIfNoneMatch)
 	assert.Equal(t, "Thu, 01 Jan 2026 00:00:00 GMT", receivedIfModifiedSince)
+}
+
+func TestCDNFetcher_ContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done() // hang until cancelled
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	f := makeFetcher(srv)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.Fetch(ctx)
+		done <- err
+	}()
+
+	<-started
+	cancel()
+	err := <-done
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestParseRetryAfterDuration_Seconds(t *testing.T) {

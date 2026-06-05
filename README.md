@@ -39,12 +39,12 @@ import (
 )
 
 func main() {
-    options, err := dynatrace.FromSDKKey(os.Getenv("DT_SDK_KEY"))
+    provider, err := dynatrace.NewProvider(os.Getenv("DT_SDK_KEY"))
     if err != nil {
         panic(err)
     }
 
-    openfeature.SetProvider(dynatrace.NewProvider(options))
+    openfeature.SetProviderAndWait(provider)
 
     client := openfeature.NewClient("my-app")
     value, _ := client.BooleanValue(
@@ -65,7 +65,7 @@ func main() {
 
 Obtain a Server SDK key from the Dynatrace Feature Management UI. Keys have the format:
 
-```
+```text
 dt01.server_{geo}_{rand}.{secret}_{sha}
 ```
 
@@ -75,7 +75,7 @@ Use `options.PublicKey()` for logging — it strips the private segment.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithCDNBaseURL(url)` | derived from key | Override CDN base URL for dev/labs environments |
+| `WithConfigOrigin(origin)` | derived from key | Override config origin (scheme, host, port — no path) for dev/labs environments |
 
 ### Polling and Grace Period
 
@@ -86,7 +86,7 @@ Per the [provider specification](https://github.com/Dynatrace/fm-knowledge-base/
 
 ## State Machine
 
-```
+```text
 NOT_READY → READY    : successful Init
 READY → STALE        : poll failure
 STALE → READY        : successful poll (recovery)

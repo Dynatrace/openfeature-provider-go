@@ -15,8 +15,9 @@ import (
 	"github.com/open-feature/flagd/core/pkg/evaluator"
 	"github.com/open-feature/flagd/core/pkg/logger"
 	"github.com/open-feature/flagd/core/pkg/model"
-	flagdsync "github.com/open-feature/flagd/core/pkg/sync"
+	"github.com/open-feature/flagd/core/pkg/notifications"
 	"github.com/open-feature/flagd/core/pkg/store"
+	flagdsync "github.com/open-feature/flagd/core/pkg/sync"
 	openfeature "github.com/open-feature/go-sdk/openfeature"
 	"go.uber.org/zap"
 )
@@ -36,11 +37,13 @@ var (
 // DynatraceProvider is a Dynatrace OpenFeature provider for server-side Go applications.
 // Use NewProvider to construct one, then register via openfeature.SetProvider.
 type DynatraceProvider struct {
-	options      Options
+	config       providerConfig
 	evaluator    evaluator.IEvaluator
+	flagStore    *store.Store
 	fetcher      *internal.CDNFetcher
 	poller       *internal.PollingManager
 	httpClient   *http.Client
+	configOrigin string
 	events       chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
@@ -51,22 +54,24 @@ type DynatraceProvider struct {
 	shutdownOnce sync.Once
 }
 
-// ProviderOption is a functional option for DynatraceProvider.
+// ProviderOption configures a DynatraceProvider.
 type ProviderOption func(*DynatraceProvider)
+
+// WithConfigOrigin overrides the config origin (scheme, host, and port). For dev/labs environments.
+// The platform and key path segments are appended automatically.
+// Production URL is derived automatically from the SDK key.
+func WithConfigOrigin(origin string) ProviderOption {
+	return func(p *DynatraceProvider) { p.configOrigin = origin }
+}
 
 // WithHTTPClient injects a custom HTTP client (e.g. a test server client).
 func WithHTTPClient(c *http.Client) ProviderOption {
 	return func(p *DynatraceProvider) { p.httpClient = c }
 }
 
-// WithPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
-func WithPollInterval(d time.Duration) ProviderOption {
+// withPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
+func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.pollInterval = d }
-}
-
-// WithGracePeriod overrides the STALE→ERROR grace period. Not user-configurable per spec; exposed for testing.
-func WithGracePeriod(d time.Duration) ProviderOption {
-	return func(p *DynatraceProvider) { p.gracePeriod = d }
 }
 
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
@@ -74,16 +79,17 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
 }
 
-// NewProvider creates a DynatraceProvider for the given Options.
-func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
+// NewProvider creates a DynatraceProvider for the given SDK key.
+// The key is validated immediately; an error is returned if the format is invalid.
+func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, error) {
 	zapLog := zap.NewNop()
 	log := logger.NewLogger(zapLog, false)
 	flagStore, _ := store.NewStore(log, nil)
 	eval := evaluator.NewJSON(log, flagStore)
 
 	p := &DynatraceProvider{
-		options:      options,
 		evaluator:    eval,
+		flagStore:    flagStore,
 		events:       make(chan openfeature.Event, 8),
 		pollInterval: defaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
@@ -92,8 +98,22 @@ func NewProvider(options Options, opts ...ProviderOption) *DynatraceProvider {
 	for _, opt := range opts {
 		opt(p)
 	}
-	p.fetcher = internal.NewCDNFetcher(options.CDNURL(), p.httpClient)
-	return p
+
+	cfg, err := parseSDKKey(sdkKey, p.configOrigin)
+	if err != nil {
+		return nil, err
+	}
+	// Only validate when using the default HTTP client; a custom client implies
+	// the caller controls the timeout (e.g. tests with a local httptest server).
+	if p.httpClient == nil && p.pollInterval <= internal.RequestTimeout {
+		return nil, fmt.Errorf(
+			"pollInterval (%s) must be greater than the request timeout (%s)",
+			p.pollInterval, internal.RequestTimeout,
+		)
+	}
+	p.config = cfg
+	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
+	return p, nil
 }
 
 // Metadata returns provider metadata.
@@ -106,9 +126,9 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook { return nil }
 
 // Init fetches the initial flag configuration and starts polling.
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
-	slog.Info("initializing dynatrace provider", "key", p.options.PublicKey())
+	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
-	result, fetchErr := p.fetcher.Fetch()
+	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
 		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
 	}
@@ -121,7 +141,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	if setErr := p.evaluator.SetState(flagdsync.DataSync{
 		FlagData: result.Body,
-		Source:   p.options.CDNURL(),
+		Source:   p.config.cdnURL,
 	}); setErr != nil {
 		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
@@ -129,11 +149,6 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	p.mu.Lock()
 	p.state = openfeature.ReadyState
 	p.mu.Unlock()
-
-	p.sendEvent(openfeature.Event{
-		ProviderName: providerName,
-		EventType:    openfeature.ProviderReady,
-	})
 
 	p.poller = internal.NewPollingManager(
 		p.fetcher.Fetch,
@@ -145,7 +160,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	)
 	p.poller.Start()
 
-	slog.Info("dynatrace provider initialized", "key", p.options.PublicKey())
+	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
 }
 
@@ -238,9 +253,43 @@ func (p *DynatraceProvider) ObjectEvaluation(ctx context.Context, flag string, d
 	}}
 }
 
-func (p *DynatraceProvider) storeFlags(json string) ([]string, error) {
-	err := p.evaluator.SetState(flagdsync.DataSync{FlagData: json, Source: p.options.CDNURL()})
-	return nil, err
+// storeFlags applies the new config and returns the keys whose flag definitions
+// changed (added, removed, or modified) compared to the prior snapshot.
+//
+// flagd-core does not expose setFlagsAndGetChangedKeys (as Java/Python flagd-core
+// do), so we diff manually around SetState using flagd's own notifications.NewFromFlags.
+func (p *DynatraceProvider) storeFlags(payload string) ([]string, error) {
+	before := flagsByKey(p.flagStore)
+	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
+		return nil, err
+	}
+	after := flagsByKey(p.flagStore)
+
+	changed := notifications.NewFromFlags(before, after)
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(changed))
+	for k := range changed {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// flagsByKey returns the store's flags keyed by flag key, or nil on read failure.
+func flagsByKey(s *store.Store) map[string]model.Flag {
+	if s == nil {
+		return nil
+	}
+	flags, _, err := s.GetAll(context.Background(), nil)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]model.Flag, len(flags))
+	for _, f := range flags {
+		out[f.Key] = f
+	}
+	return out
 }
 
 func (p *DynatraceProvider) onFetchSuccess() {
