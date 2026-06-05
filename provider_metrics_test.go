@@ -109,6 +109,29 @@ func TestProvider_MetricsURLDerivedFromGeo(t *testing.T) {
 	assert.Equal(t, "https://metrics.us.fm.dynatrace.com/v1/metrics", p.config.metricsURL)
 }
 
+func TestProvider_MetricsURLOverrideRoutesDelivery(t *testing.T) {
+	cdn := newTestServer(versionedFlagJSON, 200)
+	defer cdn.Close()
+	override := newMetricsRecorder()
+	defer override.srv.Close()
+
+	// WithMetricsURL is applied in NewProvider, taking precedence over the derived geo default.
+	p, err := NewProvider(validSDKKey,
+		WithConfigOrigin(cdn.URL),
+		WithHTTPClient(cdn.Client()),
+		WithMetricsURL(override.srv.URL),
+		withPollInterval(500*time.Millisecond),
+	)
+	require.NoError(t, err)
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+
+	p.metricsAggregator.Record("my-bool", "on", "static", "", 100, "")
+	p.Shutdown() // final flush
+
+	assert.Equal(t, []string{"cfg-1"}, override.versions(t),
+		"delivery should use the WithMetricsURL override, not the derived geo URL")
+}
+
 func TestProvider_SetsVersionOnInit(t *testing.T) {
 	cdn := newTestServer(versionedFlagJSON, 200)
 	defer cdn.Close()
