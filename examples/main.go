@@ -11,8 +11,15 @@ import (
 )
 
 func main() {
-	_ = os.Getenv("DT_SDK_KEY") // placeholder; full init coming in PR 4
-	provider := dynatrace.NewProvider()
+	sdkKey := os.Getenv("DT_SDK_KEY")
+	if sdkKey == "" {
+		log.Fatal("DT_SDK_KEY environment variable is required")
+	}
+	options, err := dynatrace.FromSDKKey(sdkKey)
+	if err != nil {
+		log.Fatalf("invalid sdk key: %v", err)
+	}
+	provider := dynatrace.NewProvider(options)
 	if err := openfeature.SetProvider(provider); err != nil {
 		log.Fatalf("failed to set provider: %v", err)
 	}
@@ -27,7 +34,5 @@ func main() {
 		log.Printf("evaluation error: %v", err)
 	}
 	fmt.Printf("my-flag = %v\n", value)
-	if err := openfeature.ShutdownWithContext(context.Background()); err != nil {
-		log.Printf("shutdown error: %v", err)
-	}
+	openfeature.Shutdown()
 }
