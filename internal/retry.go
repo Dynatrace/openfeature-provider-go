@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"time"
 )
@@ -66,6 +67,8 @@ func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context)
 		if attempt < r.MaxAttempts {
 			jitter := delayMS * r.Rng.Float64() * r.MaxJitterFactor
 			delay := time.Duration(delayMS+jitter) * time.Millisecond
+			slog.Warn("cdn fetch attempt failed; retrying",
+				"attempt", attempt, "max", r.MaxAttempts, "error", lastErr)
 			done := make(chan struct{})
 			go func() { r.Sleep(delay); close(done) }()
 			select {

@@ -107,6 +107,31 @@ func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 	assert.True(t, result.IsNotModified(), "stale-node defense should return 304, got %d", result.Status)
 }
 
+// TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag verifies that a 200
+// with a malformed Last-Modified header still updates the stored ETag, so the next
+// poll sends If-None-Match. Matches Java CdnFetcher.java behavior on 2xx.
+func TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"new-etag"`)
+		w.Header().Set("Last-Modified", "not-a-real-date")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"flags":{}}`)
+	}))
+	defer srv.Close()
+
+	f := makeFetcher(srv)
+	result, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+
+	f.mu.Lock()
+	gotETag := f.headerETag
+	gotLM := f.headerLastModified
+	f.mu.Unlock()
+	assert.Equal(t, `"new-etag"`, gotETag, "ETag must update even when Last-Modified is unparseable")
+	assert.Empty(t, gotLM, "Last-Modified must NOT be stored when unparseable")
+}
+
 func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 	var receivedIfNoneMatch, receivedIfModifiedSince string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

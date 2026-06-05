@@ -126,25 +126,24 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 
 	if status >= http.StatusOK && status < http.StatusMultipleChoices {
 		// Stale-node defense: reject 200 if Last-Modified is not strictly newer (providers.md §5.7).
+		var newLastModifiedAt time.Time
+		var lastModifiedParsed bool
 		if newLastModifiedStr != "" {
-			newLM, ok := ParseHTTPDate(newLastModifiedStr)
-			if ok && !newLM.After(lastModifiedAt) {
+			newLastModifiedAt, lastModifiedParsed = ParseHTTPDate(newLastModifiedStr)
+			if lastModifiedParsed && !newLastModifiedAt.After(lastModifiedAt) {
 				slog.Warn("cdn 200 with non-newer Last-Modified; treating as 304 (suspected stale node)",
 					"received", newLastModifiedStr)
 				return FetchResult{Status: http.StatusNotModified, ETag: etag, LastModified: lastModified}, nil
 			}
-			if ok {
-				f.mu.Lock()
-				f.headerETag = newETag
-				f.headerLastModified = newLastModifiedStr
-				f.storedLastModifiedAt = newLM
-				f.mu.Unlock()
-			}
-		} else {
-			f.mu.Lock()
-			f.headerETag = newETag
-			f.mu.Unlock()
 		}
+
+		f.mu.Lock()
+		f.headerETag = newETag
+		if lastModifiedParsed {
+			f.headerLastModified = newLastModifiedStr
+			f.storedLastModifiedAt = newLastModifiedAt
+		}
+		f.mu.Unlock()
 
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
