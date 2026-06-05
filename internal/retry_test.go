@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"testing"
 	"time"
 
@@ -11,7 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func noopSleep(_ time.Duration) {}
+// firedTimer returns a timer whose channel has already fired, so select cases
+// pick it up immediately. Useful for skipping the backoff wait in tests.
+func firedTimer(_ time.Duration) *time.Timer {
+	t := time.NewTimer(0)
+	return t
+}
 
 func seededRetry() *RetryStrategy {
 	return &RetryStrategy{
@@ -19,8 +23,7 @@ func seededRetry() *RetryStrategy {
 		BaseDelayMS:     RetryBaseDelayMS,
 		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
-		Sleep:           noopSleep,
-		Rng:             rand.New(rand.NewSource(42)),
+		NewTimer:        firedTimer,
 	}
 }
 
@@ -88,8 +91,10 @@ func TestRetry_ExhaustsOn5xx(t *testing.T) {
 func TestRetry_DelayGrowsExponentially(t *testing.T) {
 	r := seededRetry()
 	var delays []time.Duration
-	r.Sleep = func(d time.Duration) { delays = append(delays, d) }
-	r.Rng = rand.New(rand.NewSource(0))
+	r.NewTimer = func(d time.Duration) *time.Timer {
+		delays = append(delays, d)
+		return time.NewTimer(0)
+	}
 
 	_, _ = r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
 		return FetchResult{Status: 500}, nil
@@ -103,8 +108,7 @@ func TestRetry_DelayGrowsExponentially(t *testing.T) {
 
 func TestRetry_ContextCancelledDuringSleep(t *testing.T) {
 	r := seededRetry()
-	r.Sleep = time.Sleep // use real sleep so cancellation works
-	r.Rng = rand.New(rand.NewSource(0))
+	r.NewTimer = time.NewTimer
 
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
@@ -114,7 +118,7 @@ func TestRetry_ContextCancelledDuringSleep(t *testing.T) {
 	}()
 	_, err := r.Execute(ctx, func(_ context.Context) (FetchResult, error) {
 		calls++
-		return FetchResult{Status: 500}, nil // always fail → triggers retry sleep
+		return FetchResult{Status: 500}, nil
 	})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Less(t, calls, RetryMaxAttempts, "should stop retrying when context is cancelled")

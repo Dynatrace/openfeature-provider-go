@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dynatrace/openfeature-provider-go/internal"
@@ -26,6 +27,7 @@ const (
 	providerName        = "dynatrace"
 	defaultPollInterval = 10 * time.Second
 	defaultGracePeriod  = 60 * time.Second
+	channelBufferSize   = 8
 )
 
 var (
@@ -41,17 +43,19 @@ type DynatraceProvider struct {
 	evaluator    evaluator.IEvaluator
 	flagStore    *store.Store
 	fetcher      *internal.CDNFetcher
-	poller       *internal.PollingManager
 	httpClient   *http.Client
 	configOrigin string
-	events       chan openfeature.Event
+	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
 
-	mu           sync.RWMutex
-	state        openfeature.State
-	graceTimer   *time.Timer
-	shutdownOnce sync.Once
+	state             atomic.Pointer[openfeature.State]
+	successChan       chan string
+	failureChan       chan string
+	pollCancel        context.CancelFunc
+	pollDoneChan      <-chan struct{}
+	stateLoopDoneChan chan struct{}
+	shutdownOnce      sync.Once
 }
 
 // ProviderOption configures a DynatraceProvider.
@@ -90,11 +94,13 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	p := &DynatraceProvider{
 		evaluator:    eval,
 		flagStore:    flagStore,
-		events:       make(chan openfeature.Event, 8),
+		eventsChan:   make(chan openfeature.Event, channelBufferSize),
 		pollInterval: defaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
-		state:        openfeature.NotReadyState,
+		successChan:  make(chan string, channelBufferSize),
+		failureChan:  make(chan string, channelBufferSize),
 	}
+	p.setState(openfeature.NotReadyState)
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -146,19 +152,12 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
 
-	p.mu.Lock()
-	p.state = openfeature.ReadyState
-	p.mu.Unlock()
+	p.setState(openfeature.ReadyState)
 
-	p.poller = internal.NewPollingManager(
-		p.fetcher.Fetch,
-		p.storeFlags,
-		p.onConfigChanged,
-		p.onFetchSuccess,
-		p.onFetchFailure,
-		p.pollInterval,
-	)
-	p.poller.Start()
+	p.stateLoopDoneChan = make(chan struct{})
+	go p.stateLoop()
+
+	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
 
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
@@ -168,97 +167,73 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 func (p *DynatraceProvider) Shutdown() {
 	p.shutdownOnce.Do(func() {
 		slog.Info("shutting down dynatrace provider")
-		if p.poller != nil {
-			p.poller.Stop()
+		if p.pollCancel != nil {
+			p.pollCancel()
+			<-p.pollDoneChan
+			<-p.stateLoopDoneChan
 		}
-		p.cancelGraceTimer()
-		p.mu.Lock()
-		p.state = openfeature.NotReadyState
-		p.mu.Unlock()
-		close(p.events)
+		p.setState(openfeature.NotReadyState)
 		slog.Info("dynatrace provider shut down")
 	})
 }
 
 // EventChannel returns the channel on which the provider emits lifecycle events.
-func (p *DynatraceProvider) EventChannel() <-chan openfeature.Event { return p.events }
+func (p *DynatraceProvider) EventChannel() <-chan openfeature.Event { return p.eventsChan }
 
 // BooleanEvaluation resolves a boolean flag.
 func (p *DynatraceProvider) BooleanEvaluation(ctx context.Context, flag string, defaultValue bool, flatCtx openfeature.FlattenedContext) openfeature.BoolResolutionDetail {
-	if !p.isReady() {
-		return openfeature.BoolResolutionDetail{Value: defaultValue, ProviderResolutionDetail: notReadyDetail()}
-	}
-	value, variant, reason, metadata, err := p.evaluator.ResolveBooleanValue(ctx, "", flag, flatCtx)
-	if err != nil {
-		return openfeature.BoolResolutionDetail{Value: defaultValue, ProviderResolutionDetail: mapError(flag, err)}
-	}
-	return openfeature.BoolResolutionDetail{Value: value, ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
-		Variant: variant, Reason: openfeature.Reason(reason), FlagMetadata: openfeature.FlagMetadata(metadata),
-	}}
+	value, detail := resolve(p, ctx, flag, defaultValue, flatCtx, p.evaluator.ResolveBooleanValue, identity[bool])
+	return openfeature.BoolResolutionDetail{Value: value, ProviderResolutionDetail: detail}
 }
 
 // StringEvaluation resolves a string flag.
 func (p *DynatraceProvider) StringEvaluation(ctx context.Context, flag string, defaultValue string, flatCtx openfeature.FlattenedContext) openfeature.StringResolutionDetail {
-	if !p.isReady() {
-		return openfeature.StringResolutionDetail{Value: defaultValue, ProviderResolutionDetail: notReadyDetail()}
-	}
-	value, variant, reason, metadata, err := p.evaluator.ResolveStringValue(ctx, "", flag, flatCtx)
-	if err != nil {
-		return openfeature.StringResolutionDetail{Value: defaultValue, ProviderResolutionDetail: mapError(flag, err)}
-	}
-	return openfeature.StringResolutionDetail{Value: value, ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
-		Variant: variant, Reason: openfeature.Reason(reason), FlagMetadata: openfeature.FlagMetadata(metadata),
-	}}
+	value, detail := resolve(p, ctx, flag, defaultValue, flatCtx, p.evaluator.ResolveStringValue, identity[string])
+	return openfeature.StringResolutionDetail{Value: value, ProviderResolutionDetail: detail}
 }
 
 // FloatEvaluation resolves a float64 flag.
 func (p *DynatraceProvider) FloatEvaluation(ctx context.Context, flag string, defaultValue float64, flatCtx openfeature.FlattenedContext) openfeature.FloatResolutionDetail {
-	if !p.isReady() {
-		return openfeature.FloatResolutionDetail{Value: defaultValue, ProviderResolutionDetail: notReadyDetail()}
-	}
-	value, variant, reason, metadata, err := p.evaluator.ResolveFloatValue(ctx, "", flag, flatCtx)
-	if err != nil {
-		return openfeature.FloatResolutionDetail{Value: defaultValue, ProviderResolutionDetail: mapError(flag, err)}
-	}
-	return openfeature.FloatResolutionDetail{Value: value, ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
-		Variant: variant, Reason: openfeature.Reason(reason), FlagMetadata: openfeature.FlagMetadata(metadata),
-	}}
+	value, detail := resolve(p, ctx, flag, defaultValue, flatCtx, p.evaluator.ResolveFloatValue, identity[float64])
+	return openfeature.FloatResolutionDetail{Value: value, ProviderResolutionDetail: detail}
 }
 
 // IntEvaluation resolves an int64 flag.
 func (p *DynatraceProvider) IntEvaluation(ctx context.Context, flag string, defaultValue int64, flatCtx openfeature.FlattenedContext) openfeature.IntResolutionDetail {
-	if !p.isReady() {
-		return openfeature.IntResolutionDetail{Value: defaultValue, ProviderResolutionDetail: notReadyDetail()}
-	}
-	value, variant, reason, metadata, err := p.evaluator.ResolveIntValue(ctx, "", flag, flatCtx)
-	if err != nil {
-		return openfeature.IntResolutionDetail{Value: defaultValue, ProviderResolutionDetail: mapError(flag, err)}
-	}
-	return openfeature.IntResolutionDetail{Value: value, ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
-		Variant: variant, Reason: openfeature.Reason(reason), FlagMetadata: openfeature.FlagMetadata(metadata),
-	}}
+	value, detail := resolve(p, ctx, flag, defaultValue, flatCtx, p.evaluator.ResolveIntValue, identity[int64])
+	return openfeature.IntResolutionDetail{Value: value, ProviderResolutionDetail: detail}
 }
 
 // ObjectEvaluation resolves an object flag.
 func (p *DynatraceProvider) ObjectEvaluation(ctx context.Context, flag string, defaultValue any, flatCtx openfeature.FlattenedContext) openfeature.InterfaceResolutionDetail {
-	if !p.isReady() {
-		return openfeature.InterfaceResolutionDetail{Value: defaultValue, ProviderResolutionDetail: notReadyDetail()}
-	}
-	value, variant, reason, metadata, err := p.evaluator.ResolveObjectValue(ctx, "", flag, flatCtx)
-	if err != nil {
-		return openfeature.InterfaceResolutionDetail{Value: defaultValue, ProviderResolutionDetail: mapError(flag, err)}
-	}
-	return openfeature.InterfaceResolutionDetail{Value: value, ProviderResolutionDetail: openfeature.ProviderResolutionDetail{
-		Variant: variant, Reason: openfeature.Reason(reason), FlagMetadata: openfeature.FlagMetadata(metadata),
-	}}
+	value, detail := resolve(p, ctx, flag, defaultValue, flatCtx, p.evaluator.ResolveObjectValue, func(m map[string]any) any { return m })
+	return openfeature.InterfaceResolutionDetail{Value: value, ProviderResolutionDetail: detail}
 }
 
-// storeFlags applies the new config and returns the keys whose flag definitions
-// changed (added, removed, or modified) compared to the prior snapshot.
-//
-// flagd-core does not expose setFlagsAndGetChangedKeys (as Java/Python flagd-core
-// do), so we diff manually around SetState using flagd's own notifications.NewFromFlags.
-func (p *DynatraceProvider) storeFlags(payload string) ([]string, error) {
+func identity[T any](v T) T { return v }
+
+func resolve[T, U any](
+	p *DynatraceProvider,
+	ctx context.Context, flag string, defaultValue U, flatCtx openfeature.FlattenedContext,
+	fn func(context.Context, string, string, map[string]any) (T, string, string, model.Metadata, error),
+	convert func(T) U,
+) (U, openfeature.ProviderResolutionDetail) {
+	if !p.isReady() {
+		return defaultValue, notReadyDetail()
+	}
+	value, variant, reason, metadata, err := fn(ctx, "", flag, flatCtx)
+	if err != nil {
+		return defaultValue, mapError(flag, err)
+	}
+	return convert(value), openfeature.ProviderResolutionDetail{
+		Variant:      variant,
+		Reason:       openfeature.Reason(reason),
+		FlagMetadata: openfeature.FlagMetadata(metadata),
+	}
+}
+
+// commitFlags applies a fetched config payload and returns the changed keys.
+func (p *DynatraceProvider) commitFlags(payload string) ([]string, error) {
 	before := flagsByKey(p.flagStore)
 	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
 		return nil, err
@@ -292,86 +267,105 @@ func flagsByKey(s *store.Store) map[string]model.Flag {
 	return out
 }
 
-func (p *DynatraceProvider) onFetchSuccess() {
-	p.cancelGraceTimer()
-	p.mu.Lock()
-	current := p.state
-	if current == openfeature.StaleState || current == openfeature.ErrorState {
-		p.state = openfeature.ReadyState
-		p.mu.Unlock()
-		slog.Info("dynatrace provider recovered to READY", "previous", current)
-		p.sendEvent(openfeature.Event{ProviderName: providerName, EventType: openfeature.ProviderReady,
-			ProviderEventDetails: openfeature.ProviderEventDetails{Message: "recovered"}})
-		return
+func (p *DynatraceProvider) stateLoop() {
+	var grace *time.Timer
+	graceC := func() <-chan time.Time {
+		if grace == nil {
+			return nil
+		}
+		return grace.C
 	}
-	p.mu.Unlock()
+	stopGrace := func() {
+		if grace != nil {
+			grace.Stop()
+			grace = nil
+		}
+	}
+	defer func() {
+		stopGrace()
+		p.setState(openfeature.NotReadyState)
+		close(p.stateLoopDoneChan)
+	}()
+
+	// fail handles a poll failure or a commit failure. From any non-Ready state
+	// it just logs; from Ready it transitions to Stale, emits, and arms grace.
+	fail := func(reason string) {
+		if prev := p.getState(); prev != openfeature.ReadyState {
+			slog.Warn("poll failed", "state", prev, "reason", reason)
+			return
+		}
+		p.setState(openfeature.StaleState)
+		slog.Warn("poll failed; transitioning to STALE", "reason", reason)
+		p.emit(openfeature.ProviderStale, openfeature.ProviderEventDetails{Message: reason})
+		stopGrace()
+		grace = time.NewTimer(p.gracePeriod)
+	}
+
+	for {
+		select {
+		case body, ok := <-p.successChan:
+			if !ok {
+				return
+			}
+			var changed []string
+			if body != "" {
+				keys, err := p.commitFlags(body)
+				if err != nil {
+					fail("failed to store flags: " + err.Error())
+					continue
+				}
+				changed = keys
+			}
+			stopGrace()
+			if prev := p.getState(); prev == openfeature.StaleState || prev == openfeature.ErrorState {
+				p.setState(openfeature.ReadyState)
+				slog.Info("dynatrace provider recovered to READY", "previous", prev)
+				p.emit(openfeature.ProviderReady, openfeature.ProviderEventDetails{Message: "recovered"})
+			}
+			if len(changed) > 0 {
+				p.emit(openfeature.ProviderConfigChange, openfeature.ProviderEventDetails{FlagChanges: changed})
+			}
+
+		case reason, ok := <-p.failureChan:
+			if !ok {
+				return
+			}
+			fail(reason)
+
+		case <-graceC():
+			grace = nil
+			if p.getState() != openfeature.StaleState {
+				continue
+			}
+			p.setState(openfeature.ErrorState)
+			slog.Error("dynatrace provider grace period expired; transitioning to ERROR")
+			p.emit(openfeature.ProviderError, openfeature.ProviderEventDetails{Message: "grace period expired; CDN unreachable"})
+		}
+	}
 }
 
-func (p *DynatraceProvider) onFetchFailure(reason string) {
-	p.mu.Lock()
-	current := p.state
-	if current != openfeature.ReadyState {
-		p.mu.Unlock()
-		slog.Warn("poll failed", "state", current, "reason", reason)
-		return
+func (p *DynatraceProvider) getState() openfeature.State {
+	if s := p.state.Load(); s != nil {
+		return *s
 	}
-	p.state = openfeature.StaleState
-	p.mu.Unlock()
-	slog.Warn("poll failed; transitioning to STALE", "reason", reason)
-	p.sendEvent(openfeature.Event{ProviderName: providerName, EventType: openfeature.ProviderStale,
-		ProviderEventDetails: openfeature.ProviderEventDetails{Message: reason}})
-	p.startGraceTimer()
+	return openfeature.NotReadyState
 }
 
-func (p *DynatraceProvider) onConfigChanged(keys []string) {
-	p.sendEvent(openfeature.Event{ProviderName: providerName, EventType: openfeature.ProviderConfigChange,
-		ProviderEventDetails: openfeature.ProviderEventDetails{FlagChanges: keys}})
-}
-
-func (p *DynatraceProvider) startGraceTimer() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.graceTimer != nil {
-		p.graceTimer.Stop()
-	}
-	p.graceTimer = time.AfterFunc(p.gracePeriod, p.graceExpired)
-}
-
-func (p *DynatraceProvider) cancelGraceTimer() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.graceTimer != nil {
-		p.graceTimer.Stop()
-		p.graceTimer = nil
-	}
-}
-
-func (p *DynatraceProvider) graceExpired() {
-	p.mu.Lock()
-	if p.state != openfeature.StaleState {
-		p.mu.Unlock()
-		return
-	}
-	p.state = openfeature.ErrorState
-	p.mu.Unlock()
-	slog.Error("dynatrace provider grace period expired; transitioning to ERROR")
-	p.sendEvent(openfeature.Event{ProviderName: providerName, EventType: openfeature.ProviderError,
-		ProviderEventDetails: openfeature.ProviderEventDetails{Message: "grace period expired; CDN unreachable"}})
+func (p *DynatraceProvider) setState(s openfeature.State) {
+	p.state.Store(&s)
 }
 
 func (p *DynatraceProvider) isReady() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	s := p.state
+	s := p.getState()
 	return s == openfeature.ReadyState || s == openfeature.StaleState || s == openfeature.ErrorState
 }
 
-func (p *DynatraceProvider) sendEvent(e openfeature.Event) {
-	defer func() { _ = recover() }()
+func (p *DynatraceProvider) emit(t openfeature.EventType, d openfeature.ProviderEventDetails) {
+	e := openfeature.Event{ProviderName: providerName, EventType: t, ProviderEventDetails: d}
 	select {
-	case p.events <- e:
+	case p.eventsChan <- e:
 	default:
-		slog.Warn("dynatrace provider event channel full; dropping event", "type", e.EventType)
+		slog.Warn("dynatrace provider event channel full; dropping event", "type", t)
 	}
 }
 

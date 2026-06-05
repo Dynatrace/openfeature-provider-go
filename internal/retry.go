@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 
@@ -22,8 +22,7 @@ type RetryStrategy struct {
 	BaseDelayMS     float64
 	Multiplier      float64
 	MaxJitterFactor float64
-	Sleep           func(time.Duration)
-	Rng             *rand.Rand
+	NewTimer        func(time.Duration) *time.Timer
 }
 
 func NewRetryStrategy() *RetryStrategy {
@@ -32,8 +31,7 @@ func NewRetryStrategy() *RetryStrategy {
 		BaseDelayMS:     RetryBaseDelayMS,
 		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
-		Sleep:           time.Sleep,
-		Rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
+		NewTimer:        time.NewTimer,
 	}
 }
 
@@ -42,7 +40,7 @@ func ShouldRetry(status int) bool {
 }
 
 // Execute calls fn with retry on 5xx or network error.
-// Respects ctx cancellation between attempts — a cancelled context stops retrying immediately.
+// Respects ctx cancellation between attempts.
 func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context) (FetchResult, error)) (FetchResult, error) {
 	var lastErr error
 	var lastResult FetchResult
@@ -65,15 +63,15 @@ func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context)
 		}
 
 		if attempt < r.MaxAttempts {
-			jitter := delayMS * r.Rng.Float64() * r.MaxJitterFactor
+			jitter := delayMS * rand.Float64() * r.MaxJitterFactor
 			delay := time.Duration(delayMS+jitter) * time.Millisecond
 			slog.Warn("cdn fetch attempt failed; retrying",
 				"attempt", attempt, "max", r.MaxAttempts, "error", lastErr)
-			done := make(chan struct{})
-			go func() { r.Sleep(delay); close(done) }()
+			t := r.NewTimer(delay)
 			select {
-			case <-done:
+			case <-t.C:
 			case <-ctx.Done():
+				t.Stop()
 				return FetchResult{}, ctx.Err()
 			}
 			delayMS *= r.Multiplier

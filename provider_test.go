@@ -132,10 +132,10 @@ func TestProvider_StateTransition_StaleOnPollFailure(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	done := make(chan struct{})
+	doneChan := make(chan struct{})
 	var events []openfeature.EventType
 	go func() {
-		defer close(done)
+		defer close(doneChan)
 		for e := range p.EventChannel() {
 			events = append(events, e.EventType)
 			if e.EventType == openfeature.ProviderStale {
@@ -144,7 +144,7 @@ func TestProvider_StateTransition_StaleOnPollFailure(t *testing.T) {
 		}
 	}()
 	select {
-	case <-done:
+	case <-doneChan:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for PROVIDER_STALE")
 	}
@@ -171,9 +171,9 @@ func TestProvider_GraceExpiry_TransitionsToError(t *testing.T) {
 	defer p.Shutdown()
 
 	var seenError bool
-	done := make(chan struct{})
+	doneChan := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(doneChan)
 		for e := range p.EventChannel() {
 			if e.EventType == openfeature.ProviderError {
 				seenError = true
@@ -182,7 +182,7 @@ func TestProvider_GraceExpiry_TransitionsToError(t *testing.T) {
 		}
 	}()
 	select {
-	case <-done:
+	case <-doneChan:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for PROVIDER_ERROR")
 	}
@@ -229,12 +229,12 @@ func TestProvider_ConfigChange_PopulatesFlagKeys(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	done := make(chan openfeature.Event, 1)
+	changeChan := make(chan openfeature.Event, 1)
 	go func() {
 		for e := range p.EventChannel() {
 			if e.EventType == openfeature.ProviderConfigChange {
 				select {
-				case done <- e:
+				case changeChan <- e:
 				default:
 				}
 				return
@@ -243,7 +243,7 @@ func TestProvider_ConfigChange_PopulatesFlagKeys(t *testing.T) {
 	}()
 
 	select {
-	case e := <-done:
+	case e := <-changeChan:
 		assert.ElementsMatch(t,
 			[]string{"my-bool", "my-string", "my-other"},
 			e.FlagChanges,
@@ -274,20 +274,65 @@ func TestProvider_ConfigChange_NoOpPoll_NoEvent(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	gotChange := make(chan openfeature.Event, 4)
+	gotChangeChan := make(chan openfeature.Event, 4)
 	go func() {
 		for e := range p.EventChannel() {
 			if e.EventType == openfeature.ProviderConfigChange {
-				gotChange <- e
+				gotChangeChan <- e
 			}
 		}
 	}()
 
 	// Wait long enough for at least 2 polls (poll interval = 500ms).
 	select {
-	case e := <-gotChange:
+	case e := <-gotChangeChan:
 		t.Fatalf("unexpected PROVIDER_CONFIG_CHANGE on no-op poll: keys=%v", e.FlagChanges)
 	case <-time.After(1500 * time.Millisecond):
 		// Expected: no event.
 	}
+}
+
+// TestCommitFlags_ReturnsChangedKeys exercises the snapshot-diff logic in
+// commitFlags directly: applying a config from scratch reports every flag as
+// added, applying the same config a second time reports no changes, and
+// applying a modified config reports only the affected keys.
+func TestCommitFlags_ReturnsChangedKeys(t *testing.T) {
+	const initialJSON = `{
+  "flags": {
+    "a": {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "on"},
+    "b": {"state": "ENABLED", "variants": {"hello": "world"}, "defaultVariant": "hello"}
+  }
+}`
+	// a: defaultVariant flipped (modified); b: removed; c: added.
+	const updatedJSON = `{
+  "flags": {
+    "a": {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "off"},
+    "c": {"state": "ENABLED", "variants": {"x": 1, "y": 2}, "defaultVariant": "x"}
+  }
+}`
+
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+
+	keys, err := p.commitFlags(initialJSON)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a", "b"}, keys, "first commit reports all flags as added")
+
+	keys, err = p.commitFlags(initialJSON)
+	require.NoError(t, err)
+	assert.Empty(t, keys, "re-applying the same config produces no changed keys")
+
+	keys, err = p.commitFlags(updatedJSON)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, keys, "modified+removed+added are all reported")
+}
+
+// TestCommitFlags_InvalidJSON_ReturnsError verifies commitFlags surfaces parse
+// errors from the underlying evaluator rather than silently swallowing them.
+func TestCommitFlags_InvalidJSON_ReturnsError(t *testing.T) {
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+
+	_, err = p.commitFlags(`{"flags": "not-an-object"}`)
+	require.Error(t, err)
 }

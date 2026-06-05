@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -27,24 +26,24 @@ type FetchResult struct {
 
 func (r FetchResult) IsNotModified() bool { return r.Status == http.StatusNotModified }
 func (r FetchResult) IsRateLimited() bool { return r.Status == http.StatusTooManyRequests }
-func (r FetchResult) IsSuccess() bool     { return r.Status >= http.StatusOK && r.Status < http.StatusMultipleChoices }
+func (r FetchResult) IsSuccess() bool {
+	return r.Status >= http.StatusOK && r.Status < http.StatusMultipleChoices
+}
 
 // CDNFetcher performs conditional HTTP GETs against the Dynatrace CDN.
-// The fetchMu guards state mutation against concurrent callers (e.g. a future
-// SSE-triggered re-fetch racing the polling path).
 type CDNFetcher struct {
 	cdnURL string
 	Retry  *RetryStrategy
 	client *http.Client
 	clock  func() time.Time
 
-	mu                   sync.Mutex
-	headerETag            string
-	headerLastModified    string
-	storedLastModifiedAt  time.Time
-	rateLimitedUntil time.Time
+	// 1-buffered channel acting as a ctx-aware mutex (semaphore)
+	sem chan struct{}
 
-	fetchMu sync.Mutex
+	headerETag           string
+	headerLastModified   string
+	storedLastModifiedAt time.Time
+	rateLimitedUntil     time.Time
 }
 
 func NewCDNFetcher(cdnURL string, client *http.Client) *CDNFetcher {
@@ -56,35 +55,30 @@ func NewCDNFetcher(cdnURL string, client *http.Client) *CDNFetcher {
 		Retry:  NewRetryStrategy(),
 		client: client,
 		clock:  time.Now,
+		sem:    make(chan struct{}, 1),
 	}
 }
 
-func (f *CDNFetcher) IsRateLimited() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.clock().Before(f.rateLimitedUntil)
-}
-
-// Fetch performs a conditional GET with retry. Respects ctx cancellation.
+// Fetch performs a conditional GET with retry.Respects ctx cancellation
 func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
-	if f.IsRateLimited() {
+	select {
+	case f.sem <- struct{}{}:
+	case <-ctx.Done():
+		return FetchResult{}, ctx.Err()
+	}
+	defer func() { <-f.sem }()
+
+	if f.clock().Before(f.rateLimitedUntil) {
 		slog.Debug("rate limited; skipping cdn fetch")
 		return FetchResult{Status: http.StatusTooManyRequests}, nil
 	}
-	if !f.fetchMu.TryLock() {
-		slog.Debug("fetch already in progress; returning 304")
-		return FetchResult{Status: 304}, nil
-	}
-	defer f.fetchMu.Unlock()
 	return f.Retry.Execute(ctx, f.doFetch)
 }
 
 func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
-	f.mu.Lock()
 	etag := f.headerETag
 	lastModified := f.headerLastModified
 	lastModifiedAt := f.storedLastModifiedAt
-	f.mu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.cdnURL, nil)
 	if err != nil {
@@ -114,9 +108,7 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 
 	if status == http.StatusTooManyRequests {
 		delay := ParseRetryAfterDuration(resp.Header.Get("Retry-After"), f.clock())
-		f.mu.Lock()
 		f.rateLimitedUntil = f.clock().Add(delay)
-		f.mu.Unlock()
 		slog.Warn("cdn rate limited (429); pausing fetches", "delay_ms", delay.Milliseconds())
 		return FetchResult{Status: http.StatusTooManyRequests}, nil
 	}
@@ -137,13 +129,11 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 			}
 		}
 
-		f.mu.Lock()
 		f.headerETag = newETag
 		if lastModifiedParsed {
 			f.headerLastModified = newLastModifiedStr
 			f.storedLastModifiedAt = newLastModifiedAt
 		}
-		f.mu.Unlock()
 
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
