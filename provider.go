@@ -15,8 +15,9 @@ import (
 	"github.com/open-feature/flagd/core/pkg/evaluator"
 	"github.com/open-feature/flagd/core/pkg/logger"
 	"github.com/open-feature/flagd/core/pkg/model"
-	flagdsync "github.com/open-feature/flagd/core/pkg/sync"
+	"github.com/open-feature/flagd/core/pkg/notifications"
 	"github.com/open-feature/flagd/core/pkg/store"
+	flagdsync "github.com/open-feature/flagd/core/pkg/sync"
 	openfeature "github.com/open-feature/go-sdk/openfeature"
 	"go.uber.org/zap"
 )
@@ -38,6 +39,7 @@ var (
 type DynatraceProvider struct {
 	config       providerConfig
 	evaluator    evaluator.IEvaluator
+	flagStore    *store.Store
 	fetcher      *internal.CDNFetcher
 	poller       *internal.PollingManager
 	httpClient   *http.Client
@@ -87,6 +89,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 
 	p := &DynatraceProvider{
 		evaluator:    eval,
+		flagStore:    flagStore,
 		events:       make(chan openfeature.Event, 8),
 		pollInterval: defaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
@@ -250,8 +253,43 @@ func (p *DynatraceProvider) ObjectEvaluation(ctx context.Context, flag string, d
 	}}
 }
 
-func (p *DynatraceProvider) storeFlags(json string) ([]string, error) {
-	return nil, p.evaluator.SetState(flagdsync.DataSync{FlagData: json, Source: p.config.cdnURL})
+// storeFlags applies the new config and returns the keys whose flag definitions
+// changed (added, removed, or modified) compared to the prior snapshot.
+//
+// flagd-core does not expose setFlagsAndGetChangedKeys (as Java/Python flagd-core
+// do), so we diff manually around SetState using flagd's own notifications.NewFromFlags.
+func (p *DynatraceProvider) storeFlags(payload string) ([]string, error) {
+	before := flagsByKey(p.flagStore)
+	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
+		return nil, err
+	}
+	after := flagsByKey(p.flagStore)
+
+	changed := notifications.NewFromFlags(before, after)
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(changed))
+	for k := range changed {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// flagsByKey returns the store's flags keyed by flag key, or nil on read failure.
+func flagsByKey(s *store.Store) map[string]model.Flag {
+	if s == nil {
+		return nil
+	}
+	flags, _, err := s.GetAll(context.Background(), nil)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]model.Flag, len(flags))
+	for _, f := range flags {
+		out[f.Key] = f
+	}
+	return out
 }
 
 func (p *DynatraceProvider) onFetchSuccess() {
