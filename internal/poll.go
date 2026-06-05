@@ -15,9 +15,9 @@ const minPollInterval = time.Millisecond
 // closes when the goroutine exits. Call cancel then read from done to
 // shut down cleanly.
 //
-// On each tick the goroutine calls fetchFlags(ctx) and emits to success or
-// failure based on the result. Both channels are closed when polling exits,
-// so receivers can detect shutdown via channel close.
+// On each tick the goroutine calls fetchFlags(ctx) and emits to successChan
+// or failureChan based on the result. Both channels are closed when polling
+// exits, so receivers can detect shutdown via channel close.
 //
 // The ticker cadence is anchored to request initiation: time.NewTicker sends
 // ticks at regular wall-clock intervals regardless of how long fetchFlags takes,
@@ -27,39 +27,39 @@ const minPollInterval = time.Millisecond
 func Poll(
 	parent context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
-	success chan<- string,
-	failure chan<- string,
+	successChan chan<- string,
+	failureChan chan<- string,
 	interval time.Duration,
 ) (context.CancelFunc, <-chan struct{}) {
 	if interval < minPollInterval {
 		interval = minPollInterval
 	}
 	ctx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
+	doneChan := make(chan struct{})
 	go func() {
-		defer close(done)
-		defer close(success)
-		defer close(failure)
+		defer close(doneChan)
+		defer close(successChan)
+		defer close(failureChan)
 		defer cancel()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				pollOnce(ctx, fetchFlags, success, failure)
+				pollOnce(ctx, fetchFlags, successChan, failureChan)
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
-	return cancel, done
+	return cancel, doneChan
 }
 
 func pollOnce(
 	ctx context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
-	success chan<- string,
-	failure chan<- string,
+	successChan chan<- string,
+	failureChan chan<- string,
 ) {
 	result, err := fetchFlags(ctx)
 
@@ -74,13 +74,13 @@ func pollOnce(
 			return
 		}
 		slog.Warn("poll: fetch failed", "error", err)
-		emit(ctx, failure, err.Error())
+		emit(ctx, failureChan, err.Error())
 		return
 	}
 
 	if result.IsNotModified() {
 		slog.Debug("poll: flags not modified")
-		emit(ctx, success, "")
+		emit(ctx, successChan, "")
 		return
 	}
 
@@ -91,22 +91,22 @@ func pollOnce(
 
 	if !result.IsSuccess() {
 		slog.Warn("poll: non-success response", "status", result.Status)
-		emit(ctx, failure, "HTTP "+strconv.Itoa(result.Status))
+		emit(ctx, failureChan, "HTTP "+strconv.Itoa(result.Status))
 		return
 	}
 
 	if result.Body == "" {
 		slog.Warn("poll: empty response body")
-		emit(ctx, failure, "empty response body")
+		emit(ctx, failureChan, "empty response body")
 		return
 	}
 
-	emit(ctx, success, result.Body)
+	emit(ctx, successChan, result.Body)
 }
 
-func emit(ctx context.Context, ch chan<- string, msg string) {
+func emit(ctx context.Context, targetChan chan<- string, msg string) {
 	select {
-	case ch <- msg:
+	case targetChan <- msg:
 	case <-ctx.Done():
 	}
 }

@@ -45,15 +45,15 @@ type DynatraceProvider struct {
 	fetcher      *internal.CDNFetcher
 	httpClient   *http.Client
 	configOrigin string
-	events       chan openfeature.Event
+	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
 
 	state        atomic.Pointer[openfeature.State]
-	success      chan string
-	failure      chan string
+	successChan  chan string
+	failureChan  chan string
 	pollCancel   context.CancelFunc
-	pollDone     <-chan struct{}
+	pollDoneChan <-chan struct{}
 	shutdownOnce sync.Once
 }
 
@@ -93,11 +93,11 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	p := &DynatraceProvider{
 		evaluator:    eval,
 		flagStore:    flagStore,
-		events:       make(chan openfeature.Event, channelBufferSize),
+		eventsChan:   make(chan openfeature.Event, channelBufferSize),
 		pollInterval: defaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
-		success:      make(chan string, channelBufferSize),
-		failure:      make(chan string, channelBufferSize),
+		successChan:  make(chan string, channelBufferSize),
+		failureChan:  make(chan string, channelBufferSize),
 	}
 	p.setState(openfeature.NotReadyState)
 	for _, opt := range opts {
@@ -155,7 +155,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	go p.stateLoop()
 
-	p.pollCancel, p.pollDone = internal.Poll(context.Background(), p.fetcher.Fetch, p.success, p.failure, p.pollInterval)
+	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
 
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
@@ -167,7 +167,7 @@ func (p *DynatraceProvider) Shutdown() {
 		slog.Info("shutting down dynatrace provider")
 		if p.pollCancel != nil {
 			p.pollCancel()
-			<-p.pollDone
+			<-p.pollDoneChan
 		}
 		p.setState(openfeature.NotReadyState)
 		slog.Info("dynatrace provider shut down")
@@ -175,7 +175,7 @@ func (p *DynatraceProvider) Shutdown() {
 }
 
 // EventChannel returns the channel on which the provider emits lifecycle events.
-func (p *DynatraceProvider) EventChannel() <-chan openfeature.Event { return p.events }
+func (p *DynatraceProvider) EventChannel() <-chan openfeature.Event { return p.eventsChan }
 
 // BooleanEvaluation resolves a boolean flag.
 func (p *DynatraceProvider) BooleanEvaluation(ctx context.Context, flag string, defaultValue bool, flatCtx openfeature.FlattenedContext) openfeature.BoolResolutionDetail {
@@ -299,7 +299,7 @@ func (p *DynatraceProvider) stateLoop() {
 
 	for {
 		select {
-		case body, ok := <-p.success:
+		case body, ok := <-p.successChan:
 			if !ok {
 				return
 			}
@@ -322,7 +322,7 @@ func (p *DynatraceProvider) stateLoop() {
 				p.emit(openfeature.ProviderConfigChange, openfeature.ProviderEventDetails{FlagChanges: changed})
 			}
 
-		case reason, ok := <-p.failure:
+		case reason, ok := <-p.failureChan:
 			if !ok {
 				return
 			}
@@ -359,7 +359,7 @@ func (p *DynatraceProvider) isReady() bool {
 func (p *DynatraceProvider) emit(t openfeature.EventType, d openfeature.ProviderEventDetails) {
 	e := openfeature.Event{ProviderName: providerName, EventType: t, ProviderEventDetails: d}
 	select {
-	case p.events <- e:
+	case p.eventsChan <- e:
 	default:
 		slog.Warn("dynatrace provider event channel full; dropping event", "type", t)
 	}

@@ -144,9 +144,9 @@ func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 }
 
 func TestCDNFetcher_ContextCancellation(t *testing.T) {
-	started := make(chan struct{})
+	startedChan := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
+		close(startedChan)
 		<-r.Context().Done() // hang until cancelled
 		w.WriteHeader(200)
 	}))
@@ -155,15 +155,15 @@ func TestCDNFetcher_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := makeFetcher(srv)
 
-	done := make(chan error, 1)
+	doneChan := make(chan error, 1)
 	go func() {
 		_, err := f.Fetch(ctx)
-		done <- err
+		doneChan <- err
 	}()
 
-	<-started
+	<-startedChan
 	cancel()
-	err := <-done
+	err := <-doneChan
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
