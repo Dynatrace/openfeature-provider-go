@@ -34,6 +34,8 @@ const (
 	versionMetadataKey = "version"
 	// modulePath is this module's import path, used to resolve the SDK version at runtime.
 	modulePath = "github.com/Dynatrace/openfeature-provider-go"
+	// fallbackSDKVersion is reported when the module version is unavailable; it must be valid semver.
+	fallbackSDKVersion = "0.0.0"
 )
 
 var (
@@ -346,22 +348,37 @@ func (p *DynatraceProvider) updateMetricsVersionFromFlagSet() {
 	}
 }
 
-// resolveSDKVersion reports this module's version from the build info, or "unknown" when it is
-// unavailable (e.g. tests, or a build without module info).
+// resolveSDKVersion reports this module's version as bare semver (no leading "v"), or
+// fallbackSDKVersion when the version is unavailable. The metrics ingest endpoint validates this
+// field and rejects non-semver values (a "v"-prefixed tag, "(devel)" from a source build, or
+// "unknown") with HTTP 422, so the value must always be normalized.
 func resolveSDKVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	if info.Main.Path == modulePath && info.Main.Version != "" {
-		return info.Main.Version
-	}
-	for _, dep := range info.Deps {
-		if dep.Path == modulePath && dep.Version != "" {
-			return dep.Version
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Path == modulePath {
+			if v := normalizeSDKVersion(info.Main.Version); v != "" {
+				return v
+			}
+		}
+		for _, dep := range info.Deps {
+			if dep.Path == modulePath {
+				if v := normalizeSDKVersion(dep.Version); v != "" {
+					return v
+				}
+			}
 		}
 	}
-	return "unknown"
+	return fallbackSDKVersion
+}
+
+// normalizeSDKVersion converts a Go module version into the bare-semver form the metrics endpoint
+// accepts: it trims the leading "v" (Go tags releases as "v1.2.3") and returns "" for unusable
+// values ("(devel)" source builds or an empty version).
+func normalizeSDKVersion(v string) string {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if v == "" || strings.Contains(v, "devel") {
+		return ""
+	}
+	return v
 }
 
 func (p *DynatraceProvider) stateLoop() {
