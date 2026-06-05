@@ -49,12 +49,13 @@ type DynatraceProvider struct {
 	pollInterval time.Duration
 	gracePeriod  time.Duration
 
-	state        atomic.Pointer[openfeature.State]
-	successChan  chan string
-	failureChan  chan string
-	pollCancel   context.CancelFunc
-	pollDoneChan <-chan struct{}
-	shutdownOnce sync.Once
+	state             atomic.Pointer[openfeature.State]
+	successChan       chan string
+	failureChan       chan string
+	pollCancel        context.CancelFunc
+	pollDoneChan      <-chan struct{}
+	stateLoopDoneChan chan struct{}
+	shutdownOnce      sync.Once
 }
 
 // ProviderOption configures a DynatraceProvider.
@@ -153,6 +154,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	p.setState(openfeature.ReadyState)
 
+	p.stateLoopDoneChan = make(chan struct{})
 	go p.stateLoop()
 
 	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
@@ -168,6 +170,7 @@ func (p *DynatraceProvider) Shutdown() {
 		if p.pollCancel != nil {
 			p.pollCancel()
 			<-p.pollDoneChan
+			<-p.stateLoopDoneChan
 		}
 		p.setState(openfeature.NotReadyState)
 		slog.Info("dynatrace provider shut down")
@@ -281,6 +284,7 @@ func (p *DynatraceProvider) stateLoop() {
 	defer func() {
 		stopGrace()
 		p.setState(openfeature.NotReadyState)
+		close(p.stateLoopDoneChan)
 	}()
 
 	// fail handles a poll failure or a commit failure. From any non-Ready state
