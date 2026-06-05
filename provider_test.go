@@ -246,7 +246,7 @@ func TestProvider_ConfigChange_PopulatesFlagKeys(t *testing.T) {
 	case e := <-done:
 		assert.ElementsMatch(t,
 			[]string{"my-bool", "my-string", "my-other"},
-			e.ProviderEventDetails.FlagChanges,
+			e.FlagChanges,
 			"PROVIDER_CONFIG_CHANGE should report added/removed/modified keys",
 		)
 	case <-time.After(3 * time.Second):
@@ -286,7 +286,7 @@ func TestProvider_ConfigChange_NoOpPoll_NoEvent(t *testing.T) {
 	// Wait long enough for at least 2 polls (poll interval = 500ms).
 	select {
 	case e := <-gotChange:
-		t.Fatalf("unexpected PROVIDER_CONFIG_CHANGE on no-op poll: keys=%v", e.ProviderEventDetails.FlagChanges)
+		t.Fatalf("unexpected PROVIDER_CONFIG_CHANGE on no-op poll: keys=%v", e.FlagChanges)
 	case <-time.After(1500 * time.Millisecond):
 		// Expected: no event.
 	}
