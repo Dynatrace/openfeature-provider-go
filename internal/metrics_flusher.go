@@ -293,8 +293,8 @@ type metricEvaluation struct {
 }
 
 // buildMetricsPayload serializes a drained batch into the ingest JSON shape. The field names and
-// structure must match the Java and Python providers byte-for-byte; all three post to the same
-// endpoint. errorCode is omitted when empty.
+// structure must match the Java and Python providers (all three post to the same endpoint); the
+// evaluations array order is not significant. errorCode is omitted when empty.
 func buildMetricsPayload(batch DrainedBatch, sdkVersion, providerName string) ([]byte, error) {
 	evaluations := make([]metricEvaluation, 0, len(batch.Evaluations))
 	for flagKey, buckets := range batch.Evaluations {
