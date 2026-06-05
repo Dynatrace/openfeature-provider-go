@@ -291,3 +291,48 @@ func TestProvider_ConfigChange_NoOpPoll_NoEvent(t *testing.T) {
 		// Expected: no event.
 	}
 }
+
+// TestCommitFlags_ReturnsChangedKeys exercises the snapshot-diff logic in
+// commitFlags directly: applying a config from scratch reports every flag as
+// added, applying the same config a second time reports no changes, and
+// applying a modified config reports only the affected keys.
+func TestCommitFlags_ReturnsChangedKeys(t *testing.T) {
+	const initialJSON = `{
+  "flags": {
+    "a": {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "on"},
+    "b": {"state": "ENABLED", "variants": {"hello": "world"}, "defaultVariant": "hello"}
+  }
+}`
+	// a: defaultVariant flipped (modified); b: removed; c: added.
+	const updatedJSON = `{
+  "flags": {
+    "a": {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "off"},
+    "c": {"state": "ENABLED", "variants": {"x": 1, "y": 2}, "defaultVariant": "x"}
+  }
+}`
+
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+
+	keys, err := p.commitFlags(initialJSON)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a", "b"}, keys, "first commit reports all flags as added")
+
+	keys, err = p.commitFlags(initialJSON)
+	require.NoError(t, err)
+	assert.Empty(t, keys, "re-applying the same config produces no changed keys")
+
+	keys, err = p.commitFlags(updatedJSON)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, keys, "modified+removed+added are all reported")
+}
+
+// TestCommitFlags_InvalidJSON_ReturnsError verifies commitFlags surfaces parse
+// errors from the underlying evaluator rather than silently swallowing them.
+func TestCommitFlags_InvalidJSON_ReturnsError(t *testing.T) {
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+
+	_, err = p.commitFlags(`{"flags": "not-an-object"}`)
+	require.Error(t, err)
+}

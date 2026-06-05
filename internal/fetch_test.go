@@ -16,7 +16,7 @@ func makeFetcher(server *httptest.Server) *CDNFetcher {
 	f := NewCDNFetcher(server.URL+"/flags.json", server.Client())
 	f.Retry = &RetryStrategy{
 		MaxAttempts: 1, BaseDelayMS: 0, Multiplier: 1,
-		MaxJitterFactor: 0, Sleep: noopSleep, Rng: nil,
+		MaxJitterFactor: 0, NewTimer: firedTimer,
 	}
 	return f
 }
@@ -63,7 +63,6 @@ func TestCDNFetcher_429_RateLimit(t *testing.T) {
 	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
 	assert.True(t, result.IsRateLimited())
-	assert.True(t, f.IsRateLimited())
 }
 
 func TestCDNFetcher_RateLimit_SkipsFetch(t *testing.T) {
@@ -76,9 +75,7 @@ func TestCDNFetcher_RateLimit_SkipsFetch(t *testing.T) {
 	defer srv.Close()
 
 	f := makeFetcher(srv)
-	f.mu.Lock()
 	f.rateLimitedUntil = time.Now().Add(10 * time.Minute)
-	f.mu.Unlock()
 
 	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
@@ -97,10 +94,8 @@ func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 
 	f := makeFetcher(srv)
 	storedTime, _ := ParseHTTPDate("Thu, 01 Jan 2026 00:00:00 GMT")
-	f.mu.Lock()
 	f.storedLastModifiedAt = storedTime
 	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
-	f.mu.Unlock()
 
 	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
@@ -124,10 +119,8 @@ func TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.IsSuccess())
 
-	f.mu.Lock()
 	gotETag := f.headerETag
 	gotLM := f.headerLastModified
-	f.mu.Unlock()
 	assert.Equal(t, `"new-etag"`, gotETag, "ETag must update even when Last-Modified is unparseable")
 	assert.Empty(t, gotLM, "Last-Modified must NOT be stored when unparseable")
 }
@@ -142,10 +135,8 @@ func TestCDNFetcher_ConditionalHeaders(t *testing.T) {
 	defer srv.Close()
 
 	f := makeFetcher(srv)
-	f.mu.Lock()
 	f.headerETag = `"xyz"`
 	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
-	f.mu.Unlock()
 
 	_, _ = f.Fetch(context.Background())
 	assert.Equal(t, `"xyz"`, receivedIfNoneMatch)

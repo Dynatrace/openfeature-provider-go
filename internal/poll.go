@@ -5,111 +5,66 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
-	"sync"
 	"time"
 )
 
 const minPollInterval = time.Millisecond
 
-// PollingManager drives periodic flag-config polling.
+// Poll launches a goroutine that drives periodic flag-config polling. It
+// returns a cancel function that stops polling and a done channel that
+// closes when the goroutine exits. Call cancel then read from done to
+// shut down cleanly.
 //
-// The ticker fires every pollInterval and runs each poll synchronously with its
-// own child context. Stop() cancels any in-flight fetch immediately by cancelling
-// the child context, then cancels the overall lifecycle context to exit the loop.
+// On each tick the goroutine calls fetchFlags(ctx) and emits to success or
+// failure based on the result. Both channels are closed when polling exits,
+// so receivers can detect shutdown via channel close.
 //
-// The ticker cadence is anchored to request initiation: time.NewTicker sends ticks
-// at regular wall-clock intervals regardless of how long poll() takes, so the
-// effective cadence is fixed-rate as long as polls finish well within the interval
-// (which holds in production: 10s interval, 5s per-request timeout, 5 retries ≈ 1.6s
-// worst-case, see providers.md §2.1).
-type PollingManager struct {
-	fetchFlags  func(context.Context) (FetchResult, error)
-	storeFlags  func(string) ([]string, error)
-	emitChange  func([]string)
-	emitSuccess func()
-	emitFailure func(string)
-	interval    time.Duration
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	pollCancelMu sync.Mutex
-	pollCancel   context.CancelFunc
-}
-
-func NewPollingManager(
+// The ticker cadence is anchored to request initiation: time.NewTicker sends
+// ticks at regular wall-clock intervals regardless of how long fetchFlags takes,
+// so the effective cadence is fixed-rate as long as polls finish well within
+// the interval (10s interval, 5s per-request timeout, 5 retries ~1.6s worst
+// case in production; see providers.md §2.1).
+func Poll(
+	parent context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
-	storeFlags func(string) ([]string, error),
-	emitChange func([]string),
-	emitSuccess func(),
-	emitFailure func(string),
+	success chan<- string,
+	failure chan<- string,
 	interval time.Duration,
-) *PollingManager {
+) (context.CancelFunc, <-chan struct{}) {
 	if interval < minPollInterval {
 		interval = minPollInterval
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	return &PollingManager{
-		fetchFlags:  fetchFlags,
-		storeFlags:  storeFlags,
-		emitChange:  emitChange,
-		emitSuccess: emitSuccess,
-		emitFailure: emitFailure,
-		interval:    interval,
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-}
-
-// Start launches the polling goroutine.
-func (pm *PollingManager) Start() {
-	go pm.run()
-}
-
-// Stop cancels any in-flight fetch immediately and exits the polling loop.
-func (pm *PollingManager) Stop() {
-	pm.cancelCurrentPoll()
-	pm.cancel()
-}
-
-func (pm *PollingManager) run() {
-	ticker := time.NewTicker(pm.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			ctx, cancel := context.WithCancel(pm.ctx)
-			pm.pollCancelMu.Lock()
-			pm.pollCancel = cancel
-			pm.pollCancelMu.Unlock()
-
-			pm.poll(ctx)
-
-			cancel()
-			pm.pollCancelMu.Lock()
-			pm.pollCancel = nil
-			pm.pollCancelMu.Unlock()
-
-		case <-pm.ctx.Done():
-			return
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(success)
+		defer close(failure)
+		defer cancel()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pollOnce(ctx, fetchFlags, success, failure)
+			case <-ctx.Done():
+				return
+			}
 		}
-	}
+	}()
+	return cancel, done
 }
 
-func (pm *PollingManager) cancelCurrentPoll() {
-	pm.pollCancelMu.Lock()
-	defer pm.pollCancelMu.Unlock()
-	if pm.pollCancel != nil {
-		pm.pollCancel()
-		pm.pollCancel = nil
-	}
-}
+func pollOnce(
+	ctx context.Context,
+	fetchFlags func(context.Context) (FetchResult, error),
+	success chan<- string,
+	failure chan<- string,
+) {
+	result, err := fetchFlags(ctx)
 
-func (pm *PollingManager) poll(ctx context.Context) {
-	result, err := pm.fetchFlags(ctx)
-
-	if pm.ctx.Err() != nil {
-		slog.Debug("poll: manager stopped; discarding result")
+	if ctx.Err() != nil {
+		slog.Debug("poll: cancelled; discarding result")
 		return
 	}
 
@@ -119,13 +74,13 @@ func (pm *PollingManager) poll(ctx context.Context) {
 			return
 		}
 		slog.Warn("poll: fetch failed", "error", err)
-		pm.emitFailure(err.Error())
+		emit(ctx, failure, err.Error())
 		return
 	}
 
 	if result.IsNotModified() {
 		slog.Debug("poll: flags not modified")
-		pm.emitSuccess()
+		emit(ctx, success, "")
 		return
 	}
 
@@ -136,25 +91,22 @@ func (pm *PollingManager) poll(ctx context.Context) {
 
 	if !result.IsSuccess() {
 		slog.Warn("poll: non-success response", "status", result.Status)
-		pm.emitFailure("HTTP " + strconv.Itoa(result.Status))
+		emit(ctx, failure, "HTTP "+strconv.Itoa(result.Status))
 		return
 	}
 
 	if result.Body == "" {
 		slog.Warn("poll: empty response body")
-		pm.emitFailure("empty response body")
+		emit(ctx, failure, "empty response body")
 		return
 	}
 
-	changedKeys, storeErr := pm.storeFlags(result.Body)
-	if storeErr != nil {
-		slog.Warn("poll: failed to store flags", "error", storeErr)
-		pm.emitFailure("failed to store flags: " + storeErr.Error())
-		return
-	}
+	emit(ctx, success, result.Body)
+}
 
-	pm.emitSuccess()
-	if len(changedKeys) > 0 {
-		pm.emitChange(changedKeys)
+func emit(ctx context.Context, ch chan<- string, msg string) {
+	select {
+	case ch <- msg:
+	case <-ctx.Done():
 	}
 }
