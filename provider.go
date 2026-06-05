@@ -68,6 +68,8 @@ type DynatraceProvider struct {
 	metricsHook          openfeature.Hook
 	metricsURLOverride   string
 	metricsFlushInterval time.Duration
+	metricsCancel        context.CancelFunc
+	metricsDoneChan      <-chan struct{}
 }
 
 // ProviderOption configures a DynatraceProvider.
@@ -158,7 +160,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		resolveSDKVersion(),
 		providerName,
 	)
-	p.metricsHook = internal.NewMetricsHook(p.metricsAggregator, time.Now, p.metricsFlusher.OnRecord)
+	p.metricsHook = internal.NewMetricsHook(p.metricsAggregator, time.Now, p.metricsFlusher.RecordChan())
 	return p, nil
 }
 
@@ -204,7 +206,7 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	go p.stateLoop()
 
 	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
-	p.metricsFlusher.Start()
+	p.metricsCancel, p.metricsDoneChan = p.metricsFlusher.Run(context.Background())
 
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
@@ -219,8 +221,9 @@ func (p *DynatraceProvider) Shutdown() {
 			<-p.pollDoneChan
 			<-p.stateLoopDoneChan
 		}
-		if p.metricsFlusher != nil {
-			p.metricsFlusher.Stop()
+		if p.metricsCancel != nil {
+			p.metricsCancel()
+			<-p.metricsDoneChan
 		}
 		p.setState(openfeature.NotReadyState)
 		slog.Info("dynatrace provider shut down")
@@ -288,7 +291,6 @@ func resolve[T, U any](
 // version is then bumped on the now-empty aggregator.
 func (p *DynatraceProvider) commitFlags(payload string) ([]string, error) {
 	p.metricsFlusher.EnqueueSealedBatch(p.metricsAggregator.Drain())
-	p.metricsFlusher.TriggerFlush()
 
 	before := flagsByKey(p.flagStore)
 	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {

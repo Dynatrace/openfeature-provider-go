@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -29,17 +28,18 @@ type MetricsHook struct {
 	openfeature.UnimplementedHook
 	aggregator *MetricsAggregator
 	clock      func() time.Time
-	onRecord   func()
+	recordChan chan<- struct{}
 }
 
 // NewMetricsHook builds a hook recording into aggregator. clock is injectable for deterministic
-// tests (defaults to time.Now). onRecord is an optional callback invoked after each record (used
-// by the flusher to schedule capacity-triggered flushes); it is nil-safe and panic-isolated.
-func NewMetricsHook(aggregator *MetricsAggregator, clock func() time.Time, onRecord func()) *MetricsHook {
+// tests (defaults to time.Now). recordChan is an optional coalescing channel signalled after each
+// record so the flusher can schedule capacity-triggered flushes; it is nil-safe and the send never
+// blocks the evaluation path.
+func NewMetricsHook(aggregator *MetricsAggregator, clock func() time.Time, recordChan chan<- struct{}) *MetricsHook {
 	if clock == nil {
 		clock = time.Now
 	}
-	return &MetricsHook{aggregator: aggregator, clock: clock, onRecord: onRecord}
+	return &MetricsHook{aggregator: aggregator, clock: clock, recordChan: recordChan}
 }
 
 // Finally records the evaluation and notifies the capacity callback. It never blocks or fails
@@ -63,21 +63,19 @@ func (h *MetricsHook) Finally(_ context.Context, hookContext openfeature.HookCon
 		readVersion(details.FlagMetadata),
 	)
 
-	h.notifyRecord()
+	h.signalRecord()
 }
 
-// notifyRecord runs the capacity callback, isolating any panic so flush bookkeeping can never
-// disrupt the evaluation.
-func (h *MetricsHook) notifyRecord() {
-	if h.onRecord == nil {
+// signalRecord notifies the flusher that a record happened. The send is non-blocking and coalesced
+// (buffered cap 1), so it never disrupts the evaluation path.
+func (h *MetricsHook) signalRecord() {
+	if h.recordChan == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("metrics: onRecord callback panicked", "recover", r)
-		}
-	}()
-	h.onRecord()
+	select {
+	case h.recordChan <- struct{}{}:
+	default:
+	}
 }
 
 // normalizeErrorCode lowercases the error code, returning "" when there is no error. The

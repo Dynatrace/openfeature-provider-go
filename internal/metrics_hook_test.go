@@ -100,13 +100,22 @@ func TestMetricsHook_FallsBackToHookContextFlagKey(t *testing.T) {
 	assert.Contains(t, batch.Evaluations, "ctx-flag")
 }
 
-func TestMetricsHook_OnRecordPanicIsIsolated(t *testing.T) {
+func TestMetricsHook_RecordSignalNeverBlocks(t *testing.T) {
 	a := NewMetricsAggregator(DefaultMetricsHardCap)
 	a.SetVersion("v1")
-	h := NewMetricsHook(a, fixedClock(100), func() { panic("boom") })
+	// Unbuffered channel with no receiver: the non-blocking send must drop rather than block.
+	recordChan := make(chan struct{})
+	h := NewMetricsHook(a, fixedClock(100), recordChan)
 
-	assert.NotPanics(t, func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		h.Finally(context.Background(), boolHookContext("flag"), details("flag", "on", openfeature.StaticReason, "", ""), openfeature.HookHints{})
-	})
-	assert.Equal(t, 1, a.Size(), "record still happens before the callback panics")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Finally blocked on the record signal")
+	}
+	assert.Equal(t, 1, a.Size(), "record happens regardless of whether the signal is delivered")
 }

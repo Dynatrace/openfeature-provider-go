@@ -172,7 +172,7 @@ func TestProvider_RotationSealsUnderOldVersion(t *testing.T) {
 
 	// Record under cfg-1, then rotate to cfg-2 via the poller's store callback.
 	p.metricsAggregator.Record("my-bool", "on", "static", "", 100, "")
-	_, err := p.storeFlags(versionedFlagJSONv2)
+	_, err := p.commitFlags(versionedFlagJSONv2)
 	require.NoError(t, err)
 
 	metrics.waitForHit(t) // rotation triggers an out-of-band flush

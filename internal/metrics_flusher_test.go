@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -95,7 +96,16 @@ func parseVersion(t *testing.T, body []byte) string {
 	return p.Version
 }
 
-func TestMetricsFlusher_FinalFlushOnStop(t *testing.T) {
+// runFlusher starts the flush goroutine and returns a stop func (cancel + drain) for the test.
+func runFlusher(f *MetricsFlusher) func() {
+	cancel, done := f.Run(context.Background())
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func TestMetricsFlusher_FinalFlushOnShutdown(t *testing.T) {
 	fi := newFakeIngest()
 	defer fi.srv.Close()
 
@@ -104,8 +114,8 @@ func TestMetricsFlusher_FinalFlushOnStop(t *testing.T) {
 	agg.Record("flag", "on", "static", "", 100, "")
 
 	f := newTestFlusher(fi, agg, time.Hour, DefaultMetricsSoftCap)
-	f.Start()
-	f.Stop() // triggers the final synchronous flush
+	stop := runFlusher(f)
+	stop() // ctx cancel triggers the final flush before done closes
 
 	assert.Equal(t, 1, fi.count())
 }
@@ -119,8 +129,8 @@ func TestMetricsFlusher_PeriodicFlush(t *testing.T) {
 	agg.Record("flag", "on", "static", "", 100, "")
 
 	f := newTestFlusher(fi, agg, 15*time.Millisecond, DefaultMetricsSoftCap)
-	f.Start()
-	defer f.Stop()
+	stop := runFlusher(f)
+	defer stop()
 
 	fi.waitForHit(t)
 }
@@ -131,11 +141,10 @@ func TestMetricsFlusher_RotationTrigger(t *testing.T) {
 
 	agg := NewMetricsAggregator(DefaultMetricsHardCap)
 	f := newTestFlusher(fi, agg, time.Hour, DefaultMetricsSoftCap)
-	f.Start()
-	defer f.Stop()
+	stop := runFlusher(f)
+	defer stop()
 
-	f.EnqueueSealedBatch(makeBatch("v1"))
-	f.TriggerFlush()
+	f.EnqueueSealedBatch(makeBatch("v1")) // hand-off flushes on receipt
 
 	fi.waitForHit(t)
 	assert.Equal(t, "v1", parseVersion(t, fi.all()[0]))
@@ -150,10 +159,10 @@ func TestMetricsFlusher_CapacityTrigger(t *testing.T) {
 	agg.Record("flag", "on", "static", "", 100, "")
 
 	f := newTestFlusher(fi, agg, time.Hour, 1) // soft cap of 1
-	f.Start()
-	defer f.Stop()
+	stop := runFlusher(f)
+	defer stop()
 
-	f.OnRecord() // size (1) >= soft cap (1), no cooldown -> out-of-band flush
+	f.RecordChan() <- struct{}{} // size (1) >= soft cap (1), no cooldown -> out-of-band flush
 	fi.waitForHit(t)
 }
 
@@ -166,7 +175,7 @@ func TestMetricsFlusher_SealedBeforeLive(t *testing.T) {
 	agg.Record("flag", "on", "static", "", 100, "")
 
 	f := newTestFlusher(fi, agg, time.Hour, DefaultMetricsSoftCap)
-	f.EnqueueSealedBatch(makeBatch("v-sealed"))
+	f.enqueueSealed(makeBatch("v-sealed"))
 
 	f.flush() // synchronous; delivers sealed first, then live
 
@@ -182,15 +191,11 @@ func TestMetricsFlusher_400Drops(t *testing.T) {
 	fi.pushStatus(http.StatusBadRequest)
 
 	f := newTestFlusher(fi, NewMetricsAggregator(DefaultMetricsHardCap), time.Hour, DefaultMetricsSoftCap)
-	f.EnqueueSealedBatch(makeBatch("v1"))
+	f.enqueueSealed(makeBatch("v1"))
 
 	f.flush()
 	assert.Equal(t, 1, fi.count())
-
-	f.mu.Lock()
-	remaining := len(f.sealedBatches)
-	f.mu.Unlock()
-	assert.Equal(t, 0, remaining, "400 is non-retryable; batch must be dropped")
+	assert.Empty(t, f.sealed, "400 is non-retryable; batch must be dropped")
 }
 
 func TestMetricsFlusher_OtherStatusRequeues(t *testing.T) {
@@ -199,15 +204,11 @@ func TestMetricsFlusher_OtherStatusRequeues(t *testing.T) {
 	fi.pushStatus(http.StatusInternalServerError)
 
 	f := newTestFlusher(fi, NewMetricsAggregator(DefaultMetricsHardCap), time.Hour, DefaultMetricsSoftCap)
-	f.EnqueueSealedBatch(makeBatch("v1"))
+	f.enqueueSealed(makeBatch("v1"))
 
 	f.flush()
 	assert.Equal(t, 1, fi.count())
-
-	f.mu.Lock()
-	remaining := len(f.sealedBatches)
-	f.mu.Unlock()
-	assert.Equal(t, 1, remaining, "5xx must requeue the batch at the head")
+	assert.Len(t, f.sealed, 1, "5xx must requeue the batch at the head")
 }
 
 func TestMetricsFlusher_CooldownSetThenReset(t *testing.T) {
@@ -218,21 +219,15 @@ func TestMetricsFlusher_CooldownSetThenReset(t *testing.T) {
 	f.clock = func() time.Time { return time.Unix(1000, 0) }
 
 	fi.pushStatus(http.StatusInternalServerError)
-	f.EnqueueSealedBatch(makeBatch("v1"))
+	f.enqueueSealed(makeBatch("v1"))
 	f.flush() // fails -> cooldown set, batch requeued
 
-	f.mu.Lock()
-	cooldown := f.cooldownUntil
-	f.mu.Unlock()
-	assert.Equal(t, time.Unix(1000, 0).Add(failedFlushCooldown), cooldown)
+	assert.Equal(t, time.Unix(1000, 0).Add(failedFlushCooldown), f.cooldownUntil)
 
 	fi.pushStatus(http.StatusOK)
 	f.flush() // succeeds -> cooldown reset
 
-	f.mu.Lock()
-	cooldown = f.cooldownUntil
-	f.mu.Unlock()
-	assert.True(t, cooldown.IsZero(), "2xx must reset the cooldown")
+	assert.True(t, f.cooldownUntil.IsZero(), "2xx must reset the cooldown")
 }
 
 func TestMetricsFlusher_MaxSealedBatches(t *testing.T) {
@@ -241,13 +236,9 @@ func TestMetricsFlusher_MaxSealedBatches(t *testing.T) {
 
 	f := newTestFlusher(fi, NewMetricsAggregator(DefaultMetricsHardCap), time.Hour, DefaultMetricsSoftCap)
 	for range maxSealedBatches + 5 {
-		f.EnqueueSealedBatch(makeBatch("v1"))
+		f.enqueueSealed(makeBatch("v1"))
 	}
-
-	f.mu.Lock()
-	queued := len(f.sealedBatches)
-	f.mu.Unlock()
-	assert.Equal(t, maxSealedBatches, queued)
+	assert.Len(t, f.sealed, maxSealedBatches)
 }
 
 func TestMetricsFlusher_PayloadShape(t *testing.T) {
@@ -299,14 +290,15 @@ func TestMetricsFlusher_PayloadShape(t *testing.T) {
 	assert.Equal(t, "error", errored["evaluationReason"])
 }
 
-func TestMetricsFlusher_StopIsIdempotent(t *testing.T) {
+func TestMetricsFlusher_CancelIsIdempotent(t *testing.T) {
 	fi := newFakeIngest()
 	defer fi.srv.Close()
 
 	f := newTestFlusher(fi, NewMetricsAggregator(DefaultMetricsHardCap), time.Hour, DefaultMetricsSoftCap)
-	f.Start()
+	cancel, done := f.Run(context.Background())
 	assert.NotPanics(t, func() {
-		f.Stop()
-		f.Stop()
+		cancel()
+		<-done
+		cancel() // second cancel is a no-op
 	})
 }
