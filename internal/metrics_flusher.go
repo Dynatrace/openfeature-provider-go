@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -53,6 +54,12 @@ type MetricsFlusher struct {
 
 	// clock is injectable for deterministic cooldown tests (defaults to time.Now).
 	clock func() time.Time
+
+	// runOnce guards Run so the flush goroutine is launched at most once; cancel and done are
+	// captured on that first call and returned to any later callers.
+	runOnce sync.Once
+	cancel  context.CancelFunc
+	done    <-chan struct{}
 }
 
 // NewMetricsFlusher constructs a flusher. A nil httpClient gets a default client with a 10s
@@ -92,33 +99,38 @@ func (f *MetricsFlusher) RecordChan() chan<- struct{} { return f.recordChan }
 
 // Run launches the flush goroutine and returns a cancel func plus a done channel that closes once
 // the goroutine has performed its final flush and exited. Mirrors internal.Poll: cancel then
-// receive from done to shut down. Call Run at most once.
+// receive from done to shut down. Run launches the goroutine at most once; later calls are no-ops
+// that return the same cancel func and done channel from the first call.
 func (f *MetricsFlusher) Run(parent context.Context) (context.CancelFunc, <-chan struct{}) {
-	ctx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(f.flushInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				f.flush()
-			case batch := <-f.sealedChan:
-				f.enqueueSealed(batch)
-				f.flush()
-			case <-f.recordChan:
-				if f.aggregator.Size() >= f.softCap && !f.cooling() {
+	f.runOnce.Do(func() {
+		ctx, cancel := context.WithCancel(parent)
+		done := make(chan struct{})
+		f.cancel = cancel
+		f.done = done
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(f.flushInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
 					f.flush()
+				case batch := <-f.sealedChan:
+					f.enqueueSealed(batch)
+					f.flush()
+				case <-f.recordChan:
+					if f.aggregator.Size() >= f.softCap && !f.cooling() {
+						f.flush()
+					}
+				case <-ctx.Done():
+					f.drainSealedChan()
+					f.flush() // final flush
+					return
 				}
-			case <-ctx.Done():
-				f.drainSealedChan()
-				f.flush() // final flush
-				return
 			}
-		}
-	}()
-	return cancel, done
+		}()
+	})
+	return f.cancel, f.done
 }
 
 // EnqueueSealedBatch hands a version-sealed batch (from a config rotation) to the flush goroutine,
