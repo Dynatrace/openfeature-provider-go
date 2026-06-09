@@ -333,15 +333,16 @@ func flagsByKey(s *store.Store) map[string]model.Flag {
 // called after each config load; blank or absent versions are ignored.
 //
 // flagd-core merges flag-set-level metadata (which carries the config "version") into each flag's
-// metadata rather than exposing it as a separate flag-set accessor, so the version is read from a
-// resolved flag's metadata. This is the same source the metrics hook reads per evaluation.
+// metadata at load time rather than exposing it as a separate flag-set accessor, so the version is
+// read from a stored flag's metadata. This is the same source the metrics hook reads per
+// evaluation, and avoids evaluating every flag just to read one metadata key.
 func (p *DynatraceProvider) updateMetricsVersionFromFlagSet() {
-	resolutions, _, err := p.evaluator.ResolveAllValues(context.Background(), "", nil)
+	flags, _, err := p.flagStore.GetAll(context.Background(), nil)
 	if err != nil {
-		slog.Debug("metrics: resolving flag-set metadata reported an error", "error", err)
+		slog.Debug("metrics: reading flag-set metadata reported an error", "error", err)
 	}
-	for _, r := range resolutions {
-		if version, ok := r.Metadata[versionMetadataKey].(string); ok && strings.TrimSpace(version) != "" {
+	for _, f := range flags {
+		if version, ok := f.Metadata[versionMetadataKey].(string); ok && strings.TrimSpace(version) != "" {
 			p.metricsAggregator.SetVersion(version)
 			return
 		}
