@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +30,12 @@ const (
 	defaultPollInterval = 10 * time.Second
 	defaultGracePeriod  = 60 * time.Second
 	channelBufferSize   = 8
+	// versionMetadataKey is the flag-set metadata key carrying the config version.
+	versionMetadataKey = "version"
+	// modulePath is this module's import path, used to resolve the SDK version at runtime.
+	modulePath = "github.com/Dynatrace/openfeature-provider-go"
+	// fallbackSDKVersion is reported when the module version is unavailable; it must be valid semver.
+	fallbackSDKVersion = "0.0.0"
 )
 
 var (
@@ -56,6 +64,14 @@ type DynatraceProvider struct {
 	pollDoneChan      <-chan struct{}
 	stateLoopDoneChan chan struct{}
 	shutdownOnce      sync.Once
+
+	metricsAggregator    *internal.MetricsAggregator
+	metricsFlusher       *internal.MetricsFlusher
+	metricsHook          openfeature.Hook
+	metricsURLOverride   string
+	metricsFlushInterval time.Duration
+	metricsCancel        context.CancelFunc
+	metricsDoneChan      <-chan struct{}
 }
 
 // ProviderOption configures a DynatraceProvider.
@@ -81,6 +97,17 @@ func withPollInterval(d time.Duration) ProviderOption {
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
 func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
+}
+
+// WithMetricsURL overrides the evaluation-metrics ingest URL. By default it is derived from the
+// SDK key's geo segment.
+func WithMetricsURL(u string) ProviderOption {
+	return func(p *DynatraceProvider) { p.metricsURLOverride = strings.TrimSpace(u) }
+}
+
+// WithMetricsFlushInterval overrides the periodic metrics flush cadence (default 30s).
+func WithMetricsFlushInterval(d time.Duration) ProviderOption {
+	return func(p *DynatraceProvider) { p.metricsFlushInterval = d }
 }
 
 // NewProvider creates a DynatraceProvider for the given SDK key.
@@ -119,6 +146,23 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	}
 	p.config = cfg
 	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
+
+	metricsURL := cfg.metricsURL
+	if p.metricsURLOverride != "" {
+		metricsURL = p.metricsURLOverride
+	}
+	p.metricsAggregator = internal.NewMetricsAggregator(internal.DefaultMetricsHardCap)
+	p.metricsFlusher = internal.NewMetricsFlusher(
+		p.metricsAggregator,
+		p.httpClient,
+		cfg.sdkKey,
+		metricsURL,
+		p.metricsFlushInterval,
+		internal.DefaultMetricsSoftCap,
+		resolveSDKVersion(),
+		providerName,
+	)
+	p.metricsHook = internal.NewMetricsHook(p.metricsAggregator, time.Now, p.metricsFlusher.RecordChan())
 	return p, nil
 }
 
@@ -127,8 +171,13 @@ func (p *DynatraceProvider) Metadata() openfeature.Metadata {
 	return openfeature.Metadata{Name: providerName}
 }
 
-// Hooks returns an empty hook slice.
-func (p *DynatraceProvider) Hooks() []openfeature.Hook { return nil }
+// Hooks returns the provider hooks. The metrics hook records every evaluation for aggregation.
+func (p *DynatraceProvider) Hooks() []openfeature.Hook {
+	if p.metricsHook == nil {
+		return nil
+	}
+	return []openfeature.Hook{p.metricsHook}
+}
 
 // Init fetches the initial flag configuration and starts polling.
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
@@ -153,11 +202,18 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	}
 
 	p.setState(openfeature.ReadyState)
+	p.updateMetricsVersionFromFlagSet()
 
 	p.stateLoopDoneChan = make(chan struct{})
 	go p.stateLoop()
 
-	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	p.pollCancel = pollCancel
+	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	p.metricsCancel = metricsCancel
+	p.metricsDoneChan = p.metricsFlusher.Run(metricsCtx)
 
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
@@ -171,6 +227,10 @@ func (p *DynatraceProvider) Shutdown() {
 			p.pollCancel()
 			<-p.pollDoneChan
 			<-p.stateLoopDoneChan
+		}
+		if p.metricsCancel != nil {
+			p.metricsCancel()
+			<-p.metricsDoneChan
 		}
 		p.setState(openfeature.NotReadyState)
 		slog.Info("dynatrace provider shut down")
@@ -232,13 +292,20 @@ func resolve[T, U any](
 	}
 }
 
-// commitFlags applies a fetched config payload and returns the changed keys.
+// commitFlags applies a fetched config payload and returns the changed keys. Before applying the
+// new config it seals the current metrics batch under the old version and flushes it, so
+// pre-rotation counts are reported against the version under which they occurred; the live
+// version is then bumped on the now-empty aggregator.
 func (p *DynatraceProvider) commitFlags(payload string) ([]string, error) {
+	p.metricsFlusher.EnqueueSealedBatch(p.metricsAggregator.Drain())
+
 	before := flagsByKey(p.flagStore)
 	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
 		return nil, err
 	}
 	after := flagsByKey(p.flagStore)
+
+	p.updateMetricsVersionFromFlagSet()
 
 	changed := notifications.NewFromFlags(before, after)
 	if len(changed) == 0 {
@@ -265,6 +332,59 @@ func flagsByKey(s *store.Store) map[string]model.Flag {
 		out[f.Key] = f
 	}
 	return out
+}
+
+// updateMetricsVersionFromFlagSet reads the config version and sets it on the aggregator. It is
+// called after each config load; blank or absent versions are ignored.
+//
+// flagd-core merges flag-set-level metadata (which carries the config "version") into each flag's
+// metadata at load time rather than exposing it as a separate flag-set accessor, so the version is
+// read from a stored flag's metadata. This is the same source the metrics hook reads per
+// evaluation, and avoids evaluating every flag just to read one metadata key.
+func (p *DynatraceProvider) updateMetricsVersionFromFlagSet() {
+	flags, _, err := p.flagStore.GetAll(context.Background(), nil)
+	if err != nil {
+		slog.Debug("metrics: reading flag-set metadata reported an error", "error", err)
+	}
+	for _, f := range flags {
+		if version, ok := f.Metadata[versionMetadataKey].(string); ok && strings.TrimSpace(version) != "" {
+			p.metricsAggregator.SetVersion(version)
+			return
+		}
+	}
+}
+
+// resolveSDKVersion reports this module's version as bare semver (no leading "v"), or
+// fallbackSDKVersion when the version is unavailable. The metrics ingest endpoint validates this
+// field and rejects non-semver values (a "v"-prefixed tag, "(devel)" from a source build, or
+// "unknown") with HTTP 422, so the value must always be normalized.
+func resolveSDKVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Path == modulePath {
+			if v := normalizeSDKVersion(info.Main.Version); v != "" {
+				return v
+			}
+		}
+		for _, dep := range info.Deps {
+			if dep.Path == modulePath {
+				if v := normalizeSDKVersion(dep.Version); v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return fallbackSDKVersion
+}
+
+// normalizeSDKVersion converts a Go module version into the bare-semver form the metrics endpoint
+// accepts: it trims the leading "v" (Go tags releases as "v1.2.3") and returns "" for unusable
+// values ("(devel)" source builds or an empty version).
+func normalizeSDKVersion(v string) string {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if v == "" || strings.Contains(v, "devel") {
+		return ""
+	}
+	return v
 }
 
 func (p *DynatraceProvider) stateLoop() {

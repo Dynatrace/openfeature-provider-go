@@ -14,8 +14,9 @@ var keyPattern = regexp.MustCompile(
 
 // providerConfig holds validated configuration derived from the SDK key.
 type providerConfig struct {
-	sdkKey string
-	cdnURL string
+	sdkKey     string
+	cdnURL     string
+	metricsURL string
 }
 
 func (c providerConfig) publicKey() string {
@@ -57,7 +58,11 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 		cdnURL = "https://cdn." + geo + ".fm.dynatrace.com/" + platform + "/" + key + ".json"
 	}
 
-	return providerConfig{sdkKey: key, cdnURL: cdnURL}, nil
+	// The metrics ingest URL is always derived from the geo segment. A config-origin override
+	// targets only the CDN; metrics are overridden separately via WithMetricsURL.
+	metricsURL := "https://metrics." + geo + ".fm.dynatrace.com/v1/metrics"
+
+	return providerConfig{sdkKey: key, cdnURL: cdnURL, metricsURL: metricsURL}, nil
 }
 
 func publicKeySegment(key string) string {

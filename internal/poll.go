@@ -10,10 +10,9 @@ import (
 
 const minPollInterval = time.Millisecond
 
-// Poll launches a goroutine that drives periodic flag-config polling. It
-// returns a cancel function that stops polling and a done channel that
-// closes when the goroutine exits. Call cancel then read from done to
-// shut down cleanly.
+// Poll launches a goroutine that drives periodic flag-config polling. It runs until ctx is
+// cancelled, then returns. Returns a done channel that closes when the goroutine exits; the
+// caller owns the context and shuts down by cancelling it then receiving from done.
 //
 // On each tick the goroutine calls fetchFlags(ctx) and emits to successChan
 // or failureChan based on the result. Both channels are closed when polling
@@ -25,22 +24,20 @@ const minPollInterval = time.Millisecond
 // the interval (10s interval, 5s per-request timeout, 5 retries ~1.6s worst
 // case in production; see providers.md §2.1).
 func Poll(
-	parent context.Context,
+	ctx context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
 	successChan chan<- string,
 	failureChan chan<- string,
 	interval time.Duration,
-) (context.CancelFunc, <-chan struct{}) {
+) <-chan struct{} {
 	if interval < minPollInterval {
 		interval = minPollInterval
 	}
-	ctx, cancel := context.WithCancel(parent)
 	doneChan := make(chan struct{})
 	go func() {
 		defer close(doneChan)
 		defer close(successChan)
 		defer close(failureChan)
-		defer cancel()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -52,7 +49,7 @@ func Poll(
 			}
 		}
 	}()
-	return cancel, doneChan
+	return doneChan
 }
 
 func pollOnce(

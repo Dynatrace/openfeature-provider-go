@@ -11,7 +11,8 @@ import (
 func TestPoll_NotModified(t *testing.T) {
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)
-	cancel, doneChan := Poll(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
 		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 304}, nil },
 		successChan, failureChan, 10*time.Millisecond)
 	time.Sleep(35 * time.Millisecond)
@@ -29,7 +30,8 @@ func TestPoll_Success_CarriesBody(t *testing.T) {
 	const body = `{"flags":{}}`
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)
-	cancel, doneChan := Poll(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
 		func(_ context.Context) (FetchResult, error) {
 			return FetchResult{Status: 200, Body: body}, nil
 		},
@@ -48,7 +50,8 @@ func TestPoll_Success_CarriesBody(t *testing.T) {
 func TestPoll_RateLimited_Silent(t *testing.T) {
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)
-	cancel, doneChan := Poll(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
 		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 429}, nil },
 		successChan, failureChan, 10*time.Millisecond)
 	time.Sleep(25 * time.Millisecond)
@@ -66,7 +69,8 @@ func TestPoll_RateLimited_Silent(t *testing.T) {
 func TestPoll_NonSuccess_EmitsFailure(t *testing.T) {
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)
-	cancel, doneChan := Poll(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
 		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: 503}, nil },
 		successChan, failureChan, 10*time.Millisecond)
 	time.Sleep(25 * time.Millisecond)
@@ -84,7 +88,8 @@ func TestPoll_CancelInterruptsInFlightFetch(t *testing.T) {
 	startedChan := make(chan struct{})
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)
-	cancel, doneChan := Poll(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
 		func(ctx context.Context) (FetchResult, error) {
 			close(startedChan)
 			<-ctx.Done()
