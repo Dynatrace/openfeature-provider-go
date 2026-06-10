@@ -29,12 +29,12 @@ const (
 
 // MetricsFlusher periodically delivers aggregated evaluation metrics to the Dynatrace ingest
 // endpoint. All flush state (the sealed-batch queue, the cooldown) and all HTTP live on a single
-// goroutine started by Run, mirroring internal.Poll; the evaluation path never blocks on delivery
-// and the flusher needs no locking.
+// goroutine started by Run; the evaluation path never blocks on delivery and the flusher needs
+// no locking.
 //
 // Four triggers cause a flush: the periodic ticker, a capacity signal from the hook (recordChan)
 // once the aggregator exceeds the soft cap, a config rotation (EnqueueSealedBatch), and a final
-// flush when the Run context is cancelled.
+// flush when the ctx passed to Run is cancelled.
 type MetricsFlusher struct {
 	aggregator    *MetricsAggregator
 	httpClient    *http.Client
@@ -55,10 +55,9 @@ type MetricsFlusher struct {
 	// clock is injectable for deterministic cooldown tests (defaults to time.Now).
 	clock func() time.Time
 
-	// runOnce guards Run so the flush goroutine is launched at most once; cancel and done are
-	// captured on that first call and returned to any later callers.
+	// runOnce guards Run so the flush goroutine is launched at most once; done is captured on
+	// that first call and returned to any later callers.
 	runOnce sync.Once
-	cancel  context.CancelFunc
 	done    <-chan struct{}
 }
 
@@ -97,15 +96,14 @@ func NewMetricsFlusher(
 // RecordChan returns the coalescing capacity-signal channel the hook sends on after each record.
 func (f *MetricsFlusher) RecordChan() chan<- struct{} { return f.recordChan }
 
-// Run launches the flush goroutine and returns a cancel func plus a done channel that closes once
-// the goroutine has performed its final flush and exited. Mirrors internal.Poll: cancel then
-// receive from done to shut down. Run launches the goroutine at most once; later calls are no-ops
-// that return the same cancel func and done channel from the first call.
-func (f *MetricsFlusher) Run(parent context.Context) (context.CancelFunc, <-chan struct{}) {
+// Run launches the flush goroutine. It runs until ctx is cancelled, then performs a final flush
+// before exiting. Returns a done channel that closes once the goroutine has exited; the caller
+// owns the context and shuts down by cancelling it then receiving from done. Run launches the
+// goroutine at most once; later calls are no-ops that return the same done channel from the first
+// call (the ctx passed to subsequent calls is ignored).
+func (f *MetricsFlusher) Run(ctx context.Context) <-chan struct{} {
 	f.runOnce.Do(func() {
-		ctx, cancel := context.WithCancel(parent)
 		done := make(chan struct{})
-		f.cancel = cancel
 		f.done = done
 		go func() {
 			defer close(done)
@@ -130,7 +128,7 @@ func (f *MetricsFlusher) Run(parent context.Context) (context.CancelFunc, <-chan
 			}
 		}()
 	})
-	return f.cancel, f.done
+	return f.done
 }
 
 // EnqueueSealedBatch hands a version-sealed batch (from a config rotation) to the flush goroutine,

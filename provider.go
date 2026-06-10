@@ -207,8 +207,13 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	p.stateLoopDoneChan = make(chan struct{})
 	go p.stateLoop()
 
-	p.pollCancel, p.pollDoneChan = internal.Poll(context.Background(), p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
-	p.metricsCancel, p.metricsDoneChan = p.metricsFlusher.Run(context.Background())
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	p.pollCancel = pollCancel
+	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	p.metricsCancel = metricsCancel
+	p.metricsDoneChan = p.metricsFlusher.Run(metricsCtx)
 
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil

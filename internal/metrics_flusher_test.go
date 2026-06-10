@@ -98,7 +98,8 @@ func parseVersion(t *testing.T, body []byte) string {
 
 // runFlusher starts the flush goroutine and returns a stop func (cancel + drain) for the test.
 func runFlusher(f *MetricsFlusher) func() {
-	cancel, done := f.Run(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := f.Run(ctx)
 	return func() {
 		cancel()
 		<-done
@@ -295,7 +296,8 @@ func TestMetricsFlusher_CancelIsIdempotent(t *testing.T) {
 	defer fi.srv.Close()
 
 	f := newTestFlusher(fi, NewMetricsAggregator(DefaultMetricsHardCap), time.Hour, DefaultMetricsSoftCap)
-	cancel, done := f.Run(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := f.Run(ctx)
 	assert.NotPanics(t, func() {
 		cancel()
 		<-done
