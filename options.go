@@ -66,8 +66,8 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 // normaliseConfigOrigin validates that value is a bare origin and returns it in
 // canonical form. An origin is a scheme, host, and optional port — nothing else.
 // Rebuilding from the parsed parts (rather than trimming the raw string) keeps a
-// query, fragment, or user info from silently corrupting the appended path
-// segments, which would surface only as a 404 on the first config fetch.
+// query or fragment from silently corrupting the appended path segments, which
+// would surface only as a 404 on the first config fetch.
 func normaliseConfigOrigin(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -89,12 +89,9 @@ func normaliseConfigOrigin(value string) (string, error) {
 	if u.Fragment != "" {
 		return "", fmt.Errorf("config origin must not include a fragment; got %q", value)
 	}
-	if u.User != nil {
-		return "", fmt.Errorf("config origin must not include user info; got %q", value)
-	}
 	// u.Host rather than Hostname() + Port(): it preserves the brackets around an
-	// IPv6 literal, which Hostname() strips. User info is already rejected above,
-	// so at this point Host is exactly the host and optional port.
+	// IPv6 literal, which Hostname() strips. Host excludes any user info, which is
+	// dropped rather than carried into the request URL.
 	return scheme + "://" + strings.ToLower(u.Host), nil
 }
 
