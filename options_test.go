@@ -115,7 +115,7 @@ func TestParseSDKKey_NonOriginConfigOriginRejected(t *testing.T) {
 	}
 }
 
-func TestParseSDKKey_ConfigOriginNormalised(t *testing.T) {
+func TestParseSDKKey_ConfigOriginNormalized(t *testing.T) {
 	cases := []struct {
 		origin string
 		want   string

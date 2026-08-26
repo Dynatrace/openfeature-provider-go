@@ -34,7 +34,7 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	var origin string
 	if configOrigin != "" {
 		var err error
-		origin, err = normaliseConfigOrigin(configOrigin)
+		origin, err = normalizeConfigOrigin(configOrigin)
 		if err != nil {
 			return providerConfig{}, err
 		}
@@ -63,12 +63,12 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	return providerConfig{sdkKey: key, cdnURL: cdnURL, metricsURL: metricsURL}, nil
 }
 
-// normaliseConfigOrigin validates that value is a bare origin and returns it in
+// normalizeConfigOrigin validates that value is a bare origin and returns it in
 // canonical form. An origin is a scheme, host, and optional port — nothing else.
 // Rebuilding from the parsed parts (rather than trimming the raw string) keeps a
 // query or fragment from silently corrupting the appended path segments, which
 // would surface only as a 404 on the first config fetch.
-func normaliseConfigOrigin(value string) (string, error) {
+func normalizeConfigOrigin(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("config origin is not a valid URL; got %q: %w", value, err)
