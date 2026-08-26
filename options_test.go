@@ -101,6 +101,7 @@ func TestParseSDKKey_NonOriginConfigOriginRejected(t *testing.T) {
 	}{
 		{"https://example.com?tenant=x", "query string"},
 		{"https://example.com#frag", "fragment"},
+		{"https://user:pass@example.com", "user info"},
 		{"https://", "host"},
 		{"ftp://example.com", "http or https"},
 		{"example.com", "http or https"},

@@ -89,9 +89,12 @@ func normalizeConfigOrigin(value string) (string, error) {
 	if u.Fragment != "" {
 		return "", fmt.Errorf("config origin must not include a fragment; got %q", value)
 	}
+	if u.User != nil {
+		return "", fmt.Errorf("config origin must not include user info; got %q", value)
+	}
 	// u.Host rather than Hostname() + Port(): it preserves the brackets around an
-	// IPv6 literal, which Hostname() strips. Host excludes any user info, which is
-	// dropped rather than carried into the request URL.
+	// IPv6 literal, which Hostname() strips. User info is already rejected above, so
+	// Host is exactly the host and optional port.
 	return scheme + "://" + strings.ToLower(u.Host), nil
 }
 
