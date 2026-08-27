@@ -30,12 +30,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          # golangci-lint latest requires Go 1.26+ to install.
+          go-version: "1.26"
           cache: true
       - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
-          install-mode: goinstall
 
   lint-markdown:
     name: Lint Markdown
