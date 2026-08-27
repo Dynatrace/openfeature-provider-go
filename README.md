@@ -75,7 +75,10 @@ Use `options.PublicKey()` for logging — it strips the private segment.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithConfigOrigin(origin)` | derived from key | Override config origin (scheme, host, port — no path) for dev/labs environments |
+| `WithConfigOrigin(origin)` | derived from key | Override config origin (scheme, host, port; no path) for dev/labs environments |
+| `WithMetricsOrigin(origin)` | derived from key | Override metrics origin (scheme, host, port; no path) for dev/labs environments. The provider appends `/v1/metrics`. |
+
+A metrics origin is scheme, host, and optional port only. Passing a path (including the old full ingest URL `/v1/metrics`) is rejected; the provider always appends `/v1/metrics` itself.
 
 ### Polling and Grace Period
 

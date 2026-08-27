@@ -68,7 +68,7 @@ type DynatraceProvider struct {
 	metricsAggregator    *internal.MetricsAggregator
 	metricsFlusher       *internal.MetricsFlusher
 	metricsHook          openfeature.Hook
-	metricsURLOverride   string
+	metricsOrigin        string
 	metricsFlushInterval time.Duration
 	metricsCancel        context.CancelFunc
 	metricsDoneChan      <-chan struct{}
@@ -99,10 +99,11 @@ func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
 }
 
-// WithMetricsURL overrides the evaluation-metrics ingest URL. By default it is derived from the
-// SDK key's geo segment.
-func WithMetricsURL(u string) ProviderOption {
-	return func(p *DynatraceProvider) { p.metricsURLOverride = strings.TrimSpace(u) }
+// WithMetricsOrigin overrides the metrics origin (scheme, host, and optional port). For
+// dev/labs environments. The provider appends /v1/metrics. Production URL is derived
+// automatically from the SDK key.
+func WithMetricsOrigin(origin string) ProviderOption {
+	return func(p *DynatraceProvider) { p.metricsOrigin = origin }
 }
 
 // WithMetricsFlushInterval overrides the periodic metrics flush cadence (default 30s).
@@ -132,7 +133,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		opt(p)
 	}
 
-	cfg, err := parseSDKKey(sdkKey, p.configOrigin)
+	cfg, err := parseSDKKey(sdkKey, p.configOrigin, p.metricsOrigin)
 	if err != nil {
 		return nil, err
 	}
@@ -147,16 +148,12 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	p.config = cfg
 	p.fetcher = internal.NewCDNFetcher(cfg.cdnURL, p.httpClient)
 
-	metricsURL := cfg.metricsURL
-	if p.metricsURLOverride != "" {
-		metricsURL = p.metricsURLOverride
-	}
 	p.metricsAggregator = internal.NewMetricsAggregator(internal.DefaultMetricsHardCap)
 	p.metricsFlusher = internal.NewMetricsFlusher(
 		p.metricsAggregator,
 		p.httpClient,
 		cfg.sdkKey,
-		metricsURL,
+		cfg.metricsURL,
 		p.metricsFlushInterval,
 		internal.DefaultMetricsSoftCap,
 		resolveSDKVersion(),

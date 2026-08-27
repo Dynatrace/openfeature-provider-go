@@ -90,7 +90,7 @@ func newMetricsProvider(t *testing.T, cdn *httptest.Server, metrics *metricsReco
 	p, err := NewProvider(validSDKKey,
 		WithConfigOrigin(cdn.URL),
 		WithHTTPClient(cdn.Client()),
-		WithMetricsURL(metrics.srv.URL),
+		WithMetricsOrigin(metrics.srv.URL),
 		withPollInterval(500*time.Millisecond),
 	)
 	require.NoError(t, err)
@@ -109,27 +109,29 @@ func TestProvider_MetricsURLDerivedFromGeo(t *testing.T) {
 	assert.Equal(t, "https://metrics.us.fm.dynatrace.com/v1/metrics", p.config.metricsURL)
 }
 
-func TestProvider_MetricsURLOverrideRoutesDelivery(t *testing.T) {
+func TestProvider_MetricsOriginOverrideRoutesDelivery(t *testing.T) {
 	cdn := newTestServer(versionedFlagJSON, 200)
 	defer cdn.Close()
 	override := newMetricsRecorder()
 	defer override.srv.Close()
 
-	// WithMetricsURL is applied in NewProvider, taking precedence over the derived geo default.
+	// WithMetricsOrigin is applied in NewProvider, taking precedence over the derived geo default.
+	// httptest.Server.URL is an origin; the provider appends /v1/metrics.
 	p, err := NewProvider(validSDKKey,
 		WithConfigOrigin(cdn.URL),
 		WithHTTPClient(cdn.Client()),
-		WithMetricsURL(override.srv.URL),
+		WithMetricsOrigin(override.srv.URL),
 		withPollInterval(500*time.Millisecond),
 	)
 	require.NoError(t, err)
+	assert.Equal(t, override.srv.URL+"/v1/metrics", p.config.metricsURL)
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 
 	p.metricsAggregator.Record("my-bool", "on", "static", "", 100, "")
 	p.Shutdown() // final flush
 
 	assert.Equal(t, []string{"cfg-1"}, override.versions(t),
-		"delivery should use the WithMetricsURL override, not the derived geo URL")
+		"delivery should use the WithMetricsOrigin override, not the derived geo URL")
 }
 
 func TestProvider_SetsVersionOnInit(t *testing.T) {

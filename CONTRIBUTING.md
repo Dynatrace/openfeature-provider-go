@@ -35,7 +35,7 @@ and adds HTTP config fetching, polling, retry, and OpenFeature lifecycle managem
 | File | Purpose |
 | --- | --- |
 | `provider.go` | `DynatraceProvider` struct, `NewProvider`, `ProviderOption` functional options |
-| `options.go` | SDK key validation and CDN URL derivation |
+| `options.go` | SDK key validation and CDN / metrics URL derivation |
 
 ### Internal implementation
 
