@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.0-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.0.2-alpha...v0.1.0-alpha) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename WithMetricsURL to WithMetricsOrigin, accept origin-only value ([#14](https://github.com/Dynatrace/openfeature-provider-go/issues/14))
+
+### ✨ New Features
+
+* rename WithMetricsURL to WithMetricsOrigin, accept origin-only value ([#14](https://github.com/Dynatrace/openfeature-provider-go/issues/14)) ([9e61a22](https://github.com/Dynatrace/openfeature-provider-go/commit/9e61a221d2132bc741df7174957ddab8f650ec02))
+
+
+### 🐛 Bug Fixes
+
+* validate configOrigin is a bare origin, not just path-free ([#12](https://github.com/Dynatrace/openfeature-provider-go/issues/12)) ([15e6218](https://github.com/Dynatrace/openfeature-provider-go/commit/15e62181a035635930f88dac94154acbdce6992d))
+
+
+### 🧹 Chore
+
+* upgrade GitHub Actions to Node 24 compatible versions ([#11](https://github.com/Dynatrace/openfeature-provider-go/issues/11)) ([715cc8d](https://github.com/Dynatrace/openfeature-provider-go/commit/715cc8d59d53de3d9109673800045daf3c16a03e))
+
 ## [0.0.2-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.0.1-alpha...v0.0.2-alpha) (2026-06-10)
 
 
