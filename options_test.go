@@ -78,14 +78,17 @@ func TestParseSDKKey_WithConfigOrigin(t *testing.T) {
 			assert.Equal(t, "https://cdn.us.fm.dynatracelabs.com/server/"+validSDKKey+".json", cfg.cdnURL)
 		})
 	}
+	cfg, err := parseSDKKey(validSDKKey, "https://cdn.example.com:443")
+	require.NoError(t, err)
+	assert.Equal(t, "https://cdn.example.com:443/server/"+validSDKKey+".json", cfg.cdnURL)
 }
 
 func TestParseSDKKey_ConfigOriginWithPathRejected(t *testing.T) {
-	cases := []string{
+	for _, origin := range []string{
 		"https://cdn.us.fm.dynatracelabs.com/server",
-		"https://cdn.us.fm.dynatracelabs.com/server/path",
-	}
-	for _, origin := range cases {
+		"https://example.com//",
+		"https://example.com/..",
+	} {
 		t.Run(origin, func(t *testing.T) {
 			_, err := parseSDKKey(validSDKKey, origin)
 			require.Error(t, err)

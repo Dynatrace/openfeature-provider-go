@@ -31,13 +31,12 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 		return providerConfig{}, errors.New("sdk key must not be blank")
 	}
 	configOrigin = strings.TrimSpace(configOrigin)
+	var origin string
 	if configOrigin != "" {
-		u, err := url.Parse(configOrigin)
+		var err error
+		origin, err = normalizeConfigOrigin(configOrigin)
 		if err != nil {
-			return providerConfig{}, fmt.Errorf("config origin is not a valid URL: %w", err)
-		}
-		if p := strings.TrimRight(u.Path, "/"); p != "" {
-			return providerConfig{}, fmt.Errorf("config origin must not include a path; got %q", configOrigin)
+			return providerConfig{}, err
 		}
 	}
 	m := keyPattern.FindStringSubmatch(key)
@@ -51,8 +50,7 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	platform := m[2]
 
 	var cdnURL string
-	if configOrigin != "" {
-		origin := strings.TrimRight(configOrigin, "/")
+	if origin != "" {
 		cdnURL = origin + "/" + platform + "/" + key + ".json"
 	} else {
 		cdnURL = "https://cdn." + geo + ".fm.dynatrace.com/" + platform + "/" + key + ".json"
@@ -63,6 +61,41 @@ func parseSDKKey(key string, configOrigin string) (providerConfig, error) {
 	metricsURL := "https://metrics." + geo + ".fm.dynatrace.com/v1/metrics"
 
 	return providerConfig{sdkKey: key, cdnURL: cdnURL, metricsURL: metricsURL}, nil
+}
+
+// normalizeConfigOrigin validates that value is a bare origin and returns it in
+// canonical form. An origin is a scheme, host, and optional port — nothing else.
+// Rebuilding from the parsed parts (rather than trimming the raw string) keeps a
+// query or fragment from silently corrupting the appended path segments, which
+// would surface only as a 404 on the first config fetch.
+func normalizeConfigOrigin(value string) (string, error) {
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("config origin is not a valid URL; got %q: %w", value, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("config origin must use http or https; got %q", value)
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("config origin must include a host; got %q", value)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("config origin must not include a path; got %q", value)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("config origin must not include a query string; got %q", value)
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("config origin must not include a fragment; got %q", value)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("config origin must not include user info; got %q", value)
+	}
+	// u.Host rather than Hostname() + Port(): it preserves the brackets around an
+	// IPv6 literal, which Hostname() strips. User info is already rejected above, so
+	// Host is exactly the host and optional port.
+	return scheme + "://" + strings.ToLower(u.Host), nil
 }
 
 func publicKeySegment(key string) string {
