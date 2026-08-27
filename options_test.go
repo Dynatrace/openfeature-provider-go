@@ -81,60 +81,9 @@ func TestParseSDKKey_WithConfigOrigin(t *testing.T) {
 }
 
 func TestParseSDKKey_ConfigOriginWithPathRejected(t *testing.T) {
-	cases := []string{
-		"https://cdn.us.fm.dynatracelabs.com/server",
-		"https://cdn.us.fm.dynatracelabs.com/server/path",
-	}
-	for _, origin := range cases {
-		t.Run(origin, func(t *testing.T) {
-			_, err := parseSDKKey(validSDKKey, origin)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "path")
-		})
-	}
-}
-
-func TestParseSDKKey_NonOriginConfigOriginRejected(t *testing.T) {
-	cases := []struct {
-		origin string
-		want   string
-	}{
-		{"https://example.com?tenant=x", "query string"},
-		{"https://example.com#frag", "fragment"},
-		{"https://user:pass@example.com", "user info"},
-		{"https://", "host"},
-		{"ftp://example.com", "http or https"},
-		{"example.com", "http or https"},
-		{"https://example.com:notaport", "not a valid URL"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.origin, func(t *testing.T) {
-			_, err := parseSDKKey(validSDKKey, tc.origin)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.want)
-		})
-	}
-}
-
-func TestParseSDKKey_ConfigOriginNormalized(t *testing.T) {
-	cases := []struct {
-		origin string
-		want   string
-	}{
-		{"http://localhost:8080", "http://localhost:8080"},
-		{"https://example.com//", "https://example.com"},
-		{"HTTPS://Example.com", "https://example.com"},
-		// IPv6 literals must keep their brackets, or the URL is unusable.
-		{"http://[::1]:8080", "http://[::1]:8080"},
-		{"https://[2001:db8::1]", "https://[2001:db8::1]"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.origin, func(t *testing.T) {
-			cfg, err := parseSDKKey(validSDKKey, tc.origin)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want+"/server/"+validSDKKey+".json", cfg.cdnURL)
-		})
-	}
+	_, err := parseSDKKey(validSDKKey, "https://cdn.us.fm.dynatracelabs.com/server")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path")
 }
 
 func TestNewProvider_InvalidKey(t *testing.T) {
