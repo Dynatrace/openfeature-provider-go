@@ -80,7 +80,7 @@ func normalizeConfigOrigin(value string) (string, error) {
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("config origin must include a host; got %q", value)
 	}
-	if p := strings.TrimRight(u.Path, "/"); p != "" {
+	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("config origin must not include a path; got %q", value)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
