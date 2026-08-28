@@ -99,6 +99,51 @@ func TestProvider_BooleanEvaluation_AfterInit(t *testing.T) {
 	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
 }
 
+func TestProvider_BooleanEvaluation_DisabledFlag(t *testing.T) {
+	const disabledJSON = `{
+  "flags": {
+    "my-bool": {
+      "state": "DISABLED",
+      "variants": {"on": true, "off": false},
+      "defaultVariant": "on"
+    }
+  }
+}`
+	srv := newTestServer(disabledJSON, 200)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	result := p.BooleanEvaluation(context.Background(), "my-bool", true, nil)
+	assert.True(t, result.Value)
+	assert.Equal(t, openfeature.DisabledReason, result.Reason)
+	assert.Empty(t, result.Variant)
+}
+
+func TestProvider_BooleanEvaluation_NoDefaultVariant(t *testing.T) {
+	const noDefaultJSON = `{
+  "flags": {
+    "my-bool": {
+      "state": "ENABLED",
+      "variants": {"on": true, "off": false}
+    }
+  }
+}`
+	srv := newTestServer(noDefaultJSON, 200)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	result := p.BooleanEvaluation(context.Background(), "my-bool", true, nil)
+	assert.True(t, result.Value)
+	assert.Equal(t, openfeature.DefaultReason, result.Reason)
+	assert.Empty(t, result.Variant)
+}
+
 func TestProvider_Shutdown_Idempotent(t *testing.T) {
 	srv := newTestServer(testFlagJSON, 200)
 	defer srv.Close()

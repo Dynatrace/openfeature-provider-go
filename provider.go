@@ -282,6 +282,19 @@ func resolve[T, U any](
 	if err != nil {
 		return defaultValue, mapError(flag, err)
 	}
+	// Disabled flags succeed with no value; use the caller's code default.
+	if reason == model.DisabledReason {
+		return defaultValue, openfeature.ProviderResolutionDetail{
+			Reason:       openfeature.Reason(model.DisabledReason),
+			FlagMetadata: openfeature.FlagMetadata(metadata),
+		}
+	}
+	if reason == model.FallbackReason {
+		return defaultValue, openfeature.ProviderResolutionDetail{
+			Reason:       openfeature.DefaultReason,
+			FlagMetadata: openfeature.FlagMetadata(metadata),
+		}
+	}
 	return convert(value), openfeature.ProviderResolutionDetail{
 		Variant:      variant,
 		Reason:       openfeature.Reason(reason),
@@ -491,8 +504,6 @@ func mapError(flagKey string, err error) openfeature.ProviderResolutionDetail {
 	switch err.Error() {
 	case model.FlagNotFoundErrorCode:
 		resErr = openfeature.NewFlagNotFoundResolutionError(fmt.Sprintf("flag %q not found", flagKey))
-	case model.FlagDisabledErrorCode:
-		resErr = openfeature.NewFlagNotFoundResolutionError(fmt.Sprintf("flag %q is disabled", flagKey))
 	case model.TypeMismatchErrorCode:
 		resErr = openfeature.NewTypeMismatchResolutionError(fmt.Sprintf("flag %q type mismatch", flagKey))
 	case model.ParseErrorCode:
