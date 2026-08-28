@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.1.0-alpha...v0.1.1-alpha) (2026-08-28)
+
+
+### 🧹 Chore
+
+* bump flagd-core to v0.16.2 ([#16](https://github.com/Dynatrace/openfeature-provider-go/issues/16)) ([5cd7d92](https://github.com/Dynatrace/openfeature-provider-go/commit/5cd7d922cdf797455250e9900e233d9dd6934c5a))
+
 ## [0.1.0-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.0.2-alpha...v0.1.0-alpha) (2026-08-27)
 
 
