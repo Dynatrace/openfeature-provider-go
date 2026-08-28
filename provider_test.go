@@ -116,9 +116,31 @@ func TestProvider_BooleanEvaluation_DisabledFlag(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	result := p.BooleanEvaluation(context.Background(), "my-bool", false, nil)
-	assert.False(t, result.Value)
+	result := p.BooleanEvaluation(context.Background(), "my-bool", true, nil)
+	assert.True(t, result.Value)
 	assert.Equal(t, openfeature.DisabledReason, result.Reason)
+	assert.Empty(t, result.Variant)
+}
+
+func TestProvider_BooleanEvaluation_NoDefaultVariant(t *testing.T) {
+	const noDefaultJSON = `{
+  "flags": {
+    "my-bool": {
+      "state": "ENABLED",
+      "variants": {"on": true, "off": false}
+    }
+  }
+}`
+	srv := newTestServer(noDefaultJSON, 200)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	result := p.BooleanEvaluation(context.Background(), "my-bool", true, nil)
+	assert.True(t, result.Value)
+	assert.Equal(t, openfeature.DefaultReason, result.Reason)
 	assert.Empty(t, result.Variant)
 }
 
