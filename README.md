@@ -42,7 +42,7 @@ func main() {
     client := openfeature.NewClient("my-app")
     enabled, _ := client.BooleanValue(
         context.Background(),
-        "my-feature",
+        "my-flag",
         false,
         openfeature.NewEvaluationContext("user-123", nil),
     )
