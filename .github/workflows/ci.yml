@@ -33,7 +33,7 @@ jobs:
           # golangci-lint latest requires Go 1.26+ to install.
           go-version: "1.26"
           cache: true
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
