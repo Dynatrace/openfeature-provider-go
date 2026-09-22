@@ -2,6 +2,7 @@ package dynatrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -72,13 +73,17 @@ func TestProvider_Init_Success(t *testing.T) {
 func TestProvider_Init_Failure_Non2xx(t *testing.T) {
 	srv := newTestServer("", 503)
 	defer srv.Close()
-	require.Error(t, newTestProvider(t, srv).Init(openfeature.NewEvaluationContext("", nil)))
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	p.Shutdown()
 }
 
 func TestProvider_Init_Failure_EmptyBody(t *testing.T) {
 	srv := newTestServer("", 200)
 	defer srv.Close()
-	require.Error(t, newTestProvider(t, srv).Init(openfeature.NewEvaluationContext("", nil)))
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	p.Shutdown()
 }
 
 func TestProvider_BooleanEvaluation_BeforeInit(t *testing.T) {
@@ -433,4 +438,75 @@ func TestProvider_SkippedTicks_DoNotResetGraceTimer(t *testing.T) {
 			t.Fatal("grace period did not expire: skipped ticks appear to have reset it")
 		}
 	}
+}
+
+// initFailureThenRecoveryServer fails every request until flip is closed, then serves config.
+func initFailureThenRecoveryServer(status int, flipChan <-chan struct{}, calls *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		select {
+		case <-flipChan:
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(200)
+			fmt.Fprint(w, testFlagJSON)
+		default:
+			w.WriteHeader(status)
+		}
+	}))
+}
+
+// providers.md §2.4: a failed initial fetch is not terminal. The polling timer still runs, so
+// the provider recovers without operator action once the CDN comes back.
+func TestProvider_Init_Failure_RecoversOnPollingTimer(t *testing.T) {
+	var calls atomic.Int32
+	flipChan := make(chan struct{})
+	srv := initFailureThenRecoveryServer(503, flipChan, &calls)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)), "init must surface the failure")
+	defer p.Shutdown()
+	assert.False(t, p.isReady(), "no config means evaluations report PROVIDER_NOT_READY")
+
+	close(flipChan) // CDN recovers
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.EventChannel():
+			if e.EventType == openfeature.ProviderReady {
+				assert.True(t, p.isReady())
+				assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value,
+					"recovered provider serves the fetched config")
+				return
+			}
+		case <-deadline:
+			t.Fatal("provider never recovered: polling did not start after a failed init")
+		}
+	}
+}
+
+// providers.md §4: auth errors are never fatal, on initialization included.
+func TestProvider_Init_Failure_401_IsNotFatal(t *testing.T) {
+	var calls atomic.Int32
+	flipChan := make(chan struct{})
+	srv := initFailureThenRecoveryServer(401, flipChan, &calls)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	err := p.Init(openfeature.NewEvaluationContext("", nil))
+	require.Error(t, err)
+	defer p.Shutdown()
+
+	// The SDK only reports FATAL for a ProviderInitError carrying ProviderFatalCode.
+	var initErr *openfeature.ProviderInitError
+	assert.False(t, errors.As(err, &initErr), "a 401 must not produce a fatal init error")
+
+	before := calls.Load()
+	assert.Eventually(t, func() bool { return calls.Load() > before }, 3*time.Second, 50*time.Millisecond,
+		"provider must keep retrying after a 401 on init")
+
+	close(flipChan)
+	assert.Eventually(t, p.isReady, 5*time.Second, 50*time.Millisecond,
+		"provider must recover once the auth failure clears")
 }

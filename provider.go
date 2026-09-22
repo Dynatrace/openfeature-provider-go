@@ -178,9 +178,36 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook {
 }
 
 // Init fetches the initial flag configuration and starts polling.
+//
+// A failed initial fetch is not terminal. The polling timer, state loop and metrics flusher
+// start either way, so the provider recovers on a later tick exactly like any other fetch
+// failure (providers.md §2.4). Init still returns the error, which the SDK reports as a plain
+// ERROR; auth failures are no exception, since 401/403 are recoverable once a key is rotated
+// or a backend fault clears (providers.md §4). A malformed key never reaches this point: it is
+// rejected in NewProvider, before any network activity.
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
+	initErr := p.loadInitialConfig()
+	if initErr != nil {
+		slog.Error("initial cdn fetch failed; starting in ERROR and recovering on the polling timer",
+			"key", p.config.publicKey(), "error", initErr)
+	} else {
+		p.setState(openfeature.ReadyState)
+		p.updateMetricsVersionFromFlagSet()
+	}
+
+	p.startBackgroundLoops()
+
+	if initErr != nil {
+		return initErr
+	}
+	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
+	return nil
+}
+
+// loadInitialConfig performs the initial fetch and applies the config it returns.
+func (p *DynatraceProvider) loadInitialConfig() error {
 	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
 		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
@@ -191,17 +218,19 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	if result.Body == "" {
 		return fmt.Errorf("initial cdn response body was empty")
 	}
-
 	if setErr := p.evaluator.SetState(flagdsync.DataSync{
 		FlagData: result.Body,
 		Source:   p.config.cdnURL,
 	}); setErr != nil {
 		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
+	return nil
+}
 
-	p.setState(openfeature.ReadyState)
-	p.updateMetricsVersionFromFlagSet()
-
+// startBackgroundLoops starts the state loop, the polling timer and the metrics flusher. The
+// polling timer starts only once the initial fetch has settled, so it never contends with it
+// (providers.md §3.1).
+func (p *DynatraceProvider) startBackgroundLoops() {
 	p.stateLoopDoneChan = make(chan struct{})
 	go p.stateLoop()
 
@@ -214,9 +243,6 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
 	p.metricsDoneChan = p.metricsFlusher.Run(metricsCtx)
-
-	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
-	return nil
 }
 
 // Shutdown stops polling and transitions to NOT_READY. Idempotent.
@@ -450,7 +476,9 @@ func (p *DynatraceProvider) stateLoop() {
 				changed = keys
 			}
 			stopGrace()
-			if prev := p.getState(); prev == openfeature.StaleState || prev == openfeature.ErrorState {
+			// NotReady covers a failed initialization: the first successful poll is what
+			// brings the provider up, so it must emit PROVIDER_READY itself.
+			if prev := p.getState(); prev != openfeature.ReadyState {
 				p.setState(openfeature.ReadyState)
 				slog.Info("dynatrace provider recovered to READY", "previous", prev)
 				p.emit(openfeature.ProviderReady, openfeature.ProviderEventDetails{Message: "recovered"})
