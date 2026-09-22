@@ -104,3 +104,25 @@ func TestPoll_CancelInterruptsInFlightFetch(t *testing.T) {
 		t.Fatal("Poll did not return within 500ms after ctx cancel")
 	}
 }
+
+// providers.md §2.1.1: a tick that finds a fetch in flight is skipped and has no observable
+// effect. Reporting it as a success would reset the caller's staleness grace timer on every
+// tick, holding the provider READY for the whole of a CDN outage.
+func TestPoll_SkippedTick_EmitsNothing(t *testing.T) {
+	successChan := make(chan string, 8)
+	failureChan := make(chan string, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
+		func(_ context.Context) (FetchResult, error) { return FetchResult{}, ErrFetchInFlight },
+		successChan, failureChan, 10*time.Millisecond)
+	time.Sleep(35 * time.Millisecond)
+	cancel()
+	<-doneChan
+
+	for range successChan {
+		t.Fatal("a skipped tick must not report success; that would reset the grace timer")
+	}
+	for range failureChan {
+		t.Fatal("a skipped tick must not report failure; it learned nothing about the CDN")
+	}
+}

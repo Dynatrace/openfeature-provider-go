@@ -20,9 +20,14 @@ const minPollInterval = time.Millisecond
 //
 // The ticker cadence is anchored to request initiation: time.NewTicker sends
 // ticks at regular wall-clock intervals regardless of how long fetchFlags takes,
-// so the effective cadence is fixed-rate as long as polls finish well within
-// the interval (10s interval, 5s per-request timeout, 5 retries ~1.6s worst
-// case in production; see providers.md §2.1).
+// so the effective cadence is fixed-rate (providers.md §2.1).
+//
+// fetchFlags is expected to be single-flight and non-blocking under contention
+// (CDNFetcher.TryFetch). A tick that finds a fetch already running is skipped and has no
+// observable effect: it emits on neither channel, so it cannot reset the caller's staleness
+// grace timer (providers.md §2.1.1). In production the §2.1 bound rules out poll-versus-poll
+// contention anyway; the skip is what makes a violation of it harmless rather than silently
+// wrong.
 func Poll(
 	ctx context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
@@ -62,6 +67,11 @@ func pollOnce(
 
 	if ctx.Err() != nil {
 		slog.Debug("poll: cancelled; discarding result")
+		return
+	}
+
+	if errors.Is(err, ErrFetchInFlight) {
+		slog.Debug("poll: fetch already in flight; skipping tick")
 		return
 	}
 

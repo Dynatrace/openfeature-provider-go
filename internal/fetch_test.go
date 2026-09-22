@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,4 +182,44 @@ func TestFetchResult_Predicates(t *testing.T) {
 	assert.True(t, (FetchResult{Status: 200}).IsSuccess())
 	assert.True(t, (FetchResult{Status: 204}).IsSuccess())
 	assert.False(t, (FetchResult{Status: 500}).IsSuccess())
+}
+
+// providers.md §2.1.1: at most one CDN fetch in flight. A contended caller is turned away
+// with ErrFetchInFlight rather than issuing a second request.
+func TestCDNFetcher_TryFetch_SkipsWhenFetchInFlight(t *testing.T) {
+	releaseChan := make(chan struct{})
+	startedChan := make(chan struct{})
+	var requests atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			close(startedChan)
+			<-releaseChan
+		}
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"flags":{}}`)
+	}))
+	defer srv.Close()
+
+	f := makeFetcher(srv)
+	firstDoneChan := make(chan struct{})
+	go func() {
+		defer close(firstDoneChan)
+		_, err := f.Fetch(context.Background())
+		assert.NoError(t, err)
+	}()
+
+	<-startedChan
+	_, err := f.TryFetch(context.Background())
+	assert.ErrorIs(t, err, ErrFetchInFlight)
+	assert.Equal(t, int32(1), requests.Load(), "the skipped tick must not reach the CDN")
+
+	close(releaseChan)
+	<-firstDoneChan
+
+	// The slot is free again, so the next tick proceeds normally.
+	result, err := f.TryFetch(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+	assert.Equal(t, int32(2), requests.Load())
 }

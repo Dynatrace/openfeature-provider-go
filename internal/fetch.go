@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,9 +13,17 @@ import (
 )
 
 const (
-	RequestTimeout      = 5 * time.Second
+	// RequestTimeout bounds a single attempt. Together with RetryMaxAttempts it keeps
+	// MaxFetchDuration under the shortest poll interval (providers.md §2.1).
+	RequestTimeout      = 4 * time.Second
 	DefaultRetryAfterMS = 60_000
 )
+
+// ErrFetchInFlight reports that another fetch already held the single-flight slot, so this
+// caller's fetch never happened. providers.md §2.1.1 requires a contended poll tick to be
+// skipped outright: it is neither a success (which would reset the staleness grace timer) nor
+// a failure (it learned nothing about the CDN).
+var ErrFetchInFlight = errors.New("cdn fetch already in flight")
 
 // FetchResult holds the outcome of a single CDN fetch attempt.
 type FetchResult struct {
@@ -59,7 +68,9 @@ func NewCDNFetcher(cdnURL string, client *http.Client) *CDNFetcher {
 	}
 }
 
-// Fetch performs a conditional GET with retry.Respects ctx cancellation
+// Fetch performs a conditional GET with retry, waiting for the single-flight slot when another
+// fetch holds it. Used for the initial fetch, which cannot contend with a poll tick because the
+// polling timer starts only after it returns (providers.md §3.1). Respects ctx cancellation.
 func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 	select {
 	case f.sem <- struct{}{}:
@@ -67,7 +78,24 @@ func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 		return FetchResult{}, ctx.Err()
 	}
 	defer func() { <-f.sem }()
+	return f.fetchHoldingSlot(ctx)
+}
 
+// TryFetch is the non-blocking variant used by the poll ticker. When another fetch holds the
+// single-flight slot it returns ErrFetchInFlight immediately instead of queueing behind it and
+// issuing a redundant second request once the slot frees (providers.md §2.1.1).
+func (f *CDNFetcher) TryFetch(ctx context.Context) (FetchResult, error) {
+	select {
+	case f.sem <- struct{}{}:
+	default:
+		return FetchResult{}, ErrFetchInFlight
+	}
+	defer func() { <-f.sem }()
+	return f.fetchHoldingSlot(ctx)
+}
+
+// fetchHoldingSlot runs a fetch; callers must already hold the single-flight slot.
+func (f *CDNFetcher) fetchHoldingSlot(ctx context.Context) (FetchResult, error) {
 	if f.clock().Before(f.rateLimitedUntil) {
 		slog.Debug("rate limited; skipping cdn fetch")
 		return FetchResult{Status: http.StatusTooManyRequests}, nil

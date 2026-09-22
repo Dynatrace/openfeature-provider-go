@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -380,4 +381,56 @@ func TestCommitFlags_InvalidJSON_ReturnsError(t *testing.T) {
 
 	_, err = p.commitFlags(`{"flags": "not-an-object"}`)
 	require.Error(t, err)
+}
+
+// providers.md §2.1.1: poll ticks skipped because a fetch is in flight must not reset the
+// staleness grace timer, so a STALE provider still degrades to ERROR when the grace period
+// expires during a long-running fetch.
+func TestProvider_SkippedTicks_DoNotResetGraceTimer(t *testing.T) {
+	var calls atomic.Int32
+	blockChan := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch n := calls.Add(1); {
+		case n == 1: // initial fetch
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(200)
+			fmt.Fprint(w, testFlagJSON)
+		case n <= 3: // first poll: both attempts fail, arming the grace timer
+			w.WriteHeader(503)
+		default: // second poll: holds the single-flight slot, so later ticks are skipped
+			select {
+			case <-blockChan:
+			case <-r.Context().Done():
+			}
+		}
+	}))
+	// Teardown runs LIFO: unblock the stalled handler before srv.Close waits on it.
+	defer srv.Close()
+	defer close(blockChan)
+
+	p, err := NewProvider(validSDKKey,
+		WithConfigOrigin(srv.URL),
+		WithHTTPClient(srv.Client()),
+		withPollInterval(100*time.Millisecond),
+	)
+	require.NoError(t, err)
+	p.gracePeriod = time.Second
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.EventChannel():
+			if e.EventType == openfeature.ProviderError {
+				assert.Greater(t, calls.Load(), int32(3), "a poll must have been in flight")
+				assert.Less(t, calls.Load(), int32(10),
+					"ticks contending with the in-flight fetch must not reach the CDN")
+				return
+			}
+		case <-deadline:
+			t.Fatal("grace period did not expire: skipped ticks appear to have reset it")
+		}
+	}
 }

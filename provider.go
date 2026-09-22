@@ -137,12 +137,13 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	if err != nil {
 		return nil, err
 	}
-	// Only validate when using the default HTTP client; a custom client implies
-	// the caller controls the timeout (e.g. tests with a local httptest server).
-	if p.httpClient == nil && p.pollInterval <= internal.RequestTimeout {
+	// A fetch must never outlive its poll interval (providers.md §2.1). Only validated when
+	// using the default HTTP client; a custom client implies the caller controls the timeout
+	// (e.g. tests with a local httptest server).
+	if p.httpClient == nil && p.pollInterval <= internal.MaxFetchDuration() {
 		return nil, fmt.Errorf(
-			"pollInterval (%s) must be greater than the request timeout (%s)",
-			p.pollInterval, internal.RequestTimeout,
+			"pollInterval (%s) must be greater than the worst-case fetch duration (%s)",
+			p.pollInterval, internal.MaxFetchDuration(),
 		)
 	}
 	p.config = cfg
@@ -206,7 +207,9 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	p.pollCancel = pollCancel
-	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	// TryFetch, not Fetch: a tick that contends with an in-flight fetch is skipped rather
+	// than queued behind it (providers.md §2.1.1).
+	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.TryFetch, p.successChan, p.failureChan, p.pollInterval)
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
