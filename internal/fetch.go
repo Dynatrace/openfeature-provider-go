@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,11 @@ const (
 	// MaxFetchDuration under the shortest poll interval (providers.md §2.1).
 	RequestTimeout      = 4 * time.Second
 	DefaultRetryAfterMS = 60_000
+
+	// StatusSkipped marks a fetch that made no request because a Retry-After window was open.
+	// It is not an HTTP status; it is neither a success nor a failure, and reporting it as
+	// either would misrepresent a fetch that learned nothing (providers.md §2.1.1).
+	StatusSkipped = 0
 )
 
 // ErrFetchInFlight reports that another fetch already held the single-flight slot, so this
@@ -33,6 +39,7 @@ type FetchResult struct {
 	LastModified string
 }
 
+func (r FetchResult) IsSkipped() bool     { return r.Status == StatusSkipped }
 func (r FetchResult) IsNotModified() bool { return r.Status == http.StatusNotModified }
 func (r FetchResult) IsRateLimited() bool { return r.Status == http.StatusTooManyRequests }
 func (r FetchResult) IsSuccess() bool {
@@ -49,6 +56,9 @@ type CDNFetcher struct {
 	// 1-buffered channel acting as a ctx-aware mutex (semaphore)
 	sem chan struct{}
 
+	// cacheMu guards the revalidation cache. The single-flight slot already serialises
+	// fetches, but InvalidateCache is called from the state loop while a fetch may be running.
+	cacheMu              sync.Mutex
 	headerETag           string
 	headerLastModified   string
 	storedLastModifiedAt time.Time
@@ -94,19 +104,34 @@ func (f *CDNFetcher) TryFetch(ctx context.Context) (FetchResult, error) {
 	return f.fetchHoldingSlot(ctx)
 }
 
+// InvalidateCache drops the stored ETag and Last-Modified so the next fetch is unconditional.
+//
+// Call it whenever a fetched body could not be applied. The validators are stored as soon as a
+// 2xx arrives, before the caller has judged the body, so leaving them in place makes the next
+// fetch revalidate to 304 ("what you have is current") for a config that was never loaded.
+func (f *CDNFetcher) InvalidateCache() {
+	f.cacheMu.Lock()
+	defer f.cacheMu.Unlock()
+	f.headerETag = ""
+	f.headerLastModified = ""
+	f.storedLastModifiedAt = time.Time{}
+}
+
 // fetchHoldingSlot runs a fetch; callers must already hold the single-flight slot.
 func (f *CDNFetcher) fetchHoldingSlot(ctx context.Context) (FetchResult, error) {
 	if f.clock().Before(f.rateLimitedUntil) {
-		slog.Debug("rate limited; skipping cdn fetch")
-		return FetchResult{Status: http.StatusTooManyRequests}, nil
+		slog.Debug("inside Retry-After window; skipping cdn fetch (no request made)")
+		return FetchResult{Status: StatusSkipped}, nil
 	}
 	return f.Retry.Execute(ctx, f.doFetch)
 }
 
 func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
+	f.cacheMu.Lock()
 	etag := f.headerETag
 	lastModified := f.headerLastModified
 	lastModifiedAt := f.storedLastModifiedAt
+	f.cacheMu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.cdnURL, nil)
 	if err != nil {
@@ -157,11 +182,13 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 			}
 		}
 
+		f.cacheMu.Lock()
 		f.headerETag = newETag
 		if lastModifiedParsed {
 			f.headerLastModified = newLastModifiedStr
 			f.storedLastModifiedAt = newLastModifiedAt
 		}
+		f.cacheMu.Unlock()
 
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {

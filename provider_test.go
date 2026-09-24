@@ -510,3 +510,35 @@ func TestProvider_Init_Failure_401_IsNotFatal(t *testing.T) {
 	assert.Eventually(t, p.isReady, 5*time.Second, 50*time.Millisecond,
 		"provider must recover once the auth failure clears")
 }
+
+// A body that arrives 200 but cannot be applied must not leave its validators cached: the next
+// poll would then revalidate to 304, and a 304 is reported as a success, which would bring the
+// provider up READY with no flags loaded.
+func TestProvider_RejectedConfig_DoesNotCacheValidators(t *testing.T) {
+	var serveValid atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			// The provider never applied the first body, so it must not ask us to revalidate it.
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Last-Modified", "Thu, 01 Jan 2026 00:00:00 GMT")
+		w.WriteHeader(200)
+		if serveValid.Load() {
+			fmt.Fprint(w, testFlagJSON)
+			return
+		}
+		fmt.Fprint(w, `{"flags": "not-an-object"}`)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)), "an unusable config fails init")
+	defer p.Shutdown()
+
+	serveValid.Store(true)
+	assert.Eventually(t, p.isReady, 5*time.Second, 50*time.Millisecond,
+		"provider must refetch unconditionally and recover on the valid config")
+	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
+}

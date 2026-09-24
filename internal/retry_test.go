@@ -21,7 +21,6 @@ func seededRetry() *RetryStrategy {
 	return &RetryStrategy{
 		MaxAttempts:     RetryMaxAttempts,
 		BaseDelayMS:     RetryBaseDelayMS,
-		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
 		NewTimer:        firedTimer,
 	}

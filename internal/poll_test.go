@@ -66,6 +66,27 @@ func TestPoll_RateLimited_Silent(t *testing.T) {
 	}
 }
 
+// A skipped fetch made no request, so it is neither a success (which would reset the staleness
+// grace timer) nor a failure (it learned nothing about the CDN).
+func TestPoll_SkippedResult_EmitsNothing(t *testing.T) {
+	successChan := make(chan string, 8)
+	failureChan := make(chan string, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	doneChan := Poll(ctx,
+		func(_ context.Context) (FetchResult, error) { return FetchResult{Status: StatusSkipped}, nil },
+		successChan, failureChan, 10*time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	<-doneChan
+
+	for range successChan {
+		t.Fatal("expected no success messages")
+	}
+	for range failureChan {
+		t.Fatal("expected no failure messages")
+	}
+}
+
 func TestPoll_NonSuccess_EmitsFailure(t *testing.T) {
 	successChan := make(chan string, 8)
 	failureChan := make(chan string, 8)

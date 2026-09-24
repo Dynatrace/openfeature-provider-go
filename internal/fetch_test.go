@@ -16,7 +16,7 @@ import (
 func makeFetcher(server *httptest.Server) *CDNFetcher {
 	f := NewCDNFetcher(server.URL+"/flags.json", server.Client())
 	f.Retry = &RetryStrategy{
-		MaxAttempts: 1, BaseDelayMS: 0, Multiplier: 1,
+		MaxAttempts: 1, BaseDelayMS: 0,
 		MaxJitterFactor: 0, NewTimer: firedTimer,
 	}
 	return f
@@ -80,8 +80,37 @@ func TestCDNFetcher_RateLimit_SkipsFetch(t *testing.T) {
 
 	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
-	assert.True(t, result.IsRateLimited())
+	// No request was made, so the tick is a skip, not a server 429: the caller must be able to
+	// tell "we chose not to ask" from "the CDN told us to back off".
+	assert.True(t, result.IsSkipped())
+	assert.False(t, result.IsRateLimited())
 	assert.Equal(t, 0, calls)
+}
+
+// The validators are stored as soon as a 2xx lands, before the caller has judged the body. If a
+// rejected body left them in place the next fetch would revalidate to 304 for a config that was
+// never applied, and the caller would read that as "what you have is current".
+func TestCDNFetcher_InvalidateCache_ForcesUnconditionalFetch(t *testing.T) {
+	var conditional atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			conditional.Store(true)
+		}
+		w.Header().Set("ETag", `"abc"`)
+		w.Header().Set("Last-Modified", "Thu, 01 Jan 2026 00:00:00 GMT")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"flags":{}}`)
+	}))
+	defer srv.Close()
+
+	f := makeFetcher(srv)
+	_, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+
+	f.InvalidateCache()
+	_, err = f.Fetch(context.Background())
+	require.NoError(t, err)
+	assert.False(t, conditional.Load(), "fetch after InvalidateCache must not be conditional")
 }
 
 func TestCDNFetcher_StaleNodeDefense(t *testing.T) {

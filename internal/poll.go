@@ -85,6 +85,12 @@ func pollOnce(
 		return
 	}
 
+	// No request was made, so the tick is neither a success nor a failure (providers.md §2.1.1).
+	if result.IsSkipped() {
+		slog.Debug("poll: inside Retry-After window; skipping tick")
+		return
+	}
+
 	if result.IsNotModified() {
 		slog.Debug("poll: flags not modified")
 		emit(ctx, successChan, "")
@@ -92,7 +98,7 @@ func pollOnce(
 	}
 
 	if result.IsRateLimited() {
-		slog.Debug("poll: rate limited; serving cached values")
+		slog.Debug("poll: cdn returned 429; serving cached values")
 		return
 	}
 

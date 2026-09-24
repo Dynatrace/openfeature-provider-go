@@ -190,6 +190,10 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 
 	initErr := p.loadInitialConfig()
 	if initErr != nil {
+		// The validators are cached as soon as a 2xx lands, before the body is judged. Drop them
+		// so the recovering poll fetches unconditionally instead of 304-ing on a config that was
+		// never applied.
+		p.fetcher.InvalidateCache()
 		slog.Error("initial cdn fetch failed; starting in ERROR and recovering on the polling timer",
 			"key", p.config.publicKey(), "error", initErr)
 	} else {
@@ -211,6 +215,9 @@ func (p *DynatraceProvider) loadInitialConfig() error {
 	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
 		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
+	}
+	if result.IsSkipped() {
+		return fmt.Errorf("initial cdn fetch was skipped")
 	}
 	if !result.IsSuccess() {
 		return fmt.Errorf("initial cdn fetch returned HTTP %d", result.Status)
@@ -340,6 +347,9 @@ func (p *DynatraceProvider) commitFlags(payload string) ([]string, error) {
 
 	before := flagsByKey(p.flagStore)
 	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
+		// The body was fetched but not applied, so the cached validators describe a config the
+		// store never took. Drop them so the next poll refetches it instead of seeing a 304.
+		p.fetcher.InvalidateCache()
 		return nil, err
 	}
 	after := flagsByKey(p.flagStore)

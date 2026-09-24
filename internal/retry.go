@@ -16,7 +16,6 @@ const (
 	// retrying for half a minute.
 	RetryMaxAttempts     = 2
 	RetryBaseDelayMS     = 100.0
-	RetryMultiplier      = 2.0
 	RetryMaxJitterFactor = 0.20
 )
 
@@ -25,13 +24,11 @@ const (
 // "MaxFetchDuration < shortest poll interval" an invariant, so two polls can never be in
 // flight at once; any change to the timeout, attempt count or backoff must preserve it.
 func MaxFetchDuration() time.Duration {
-	total := time.Duration(RetryMaxAttempts) * RequestTimeout
-	delayMS := RetryBaseDelayMS
-	for attempt := 1; attempt < RetryMaxAttempts; attempt++ {
-		total += time.Duration(delayMS * (1 + RetryMaxJitterFactor) * float64(time.Millisecond))
-		delayMS *= RetryMultiplier
-	}
-	return total
+	attempts := time.Duration(RetryMaxAttempts) * RequestTimeout
+	backoff := time.Duration(
+		(RetryMaxAttempts - 1) * RetryBaseDelayMS * (1 + RetryMaxJitterFactor) * float64(time.Millisecond),
+	)
+	return attempts + backoff
 }
 
 // RetryStrategy applies backoff with jitter for transient HTTP failures. Retries on 5xx and
@@ -40,7 +37,6 @@ func MaxFetchDuration() time.Duration {
 type RetryStrategy struct {
 	MaxAttempts     int
 	BaseDelayMS     float64
-	Multiplier      float64
 	MaxJitterFactor float64
 	NewTimer        func(time.Duration) *time.Timer
 }
@@ -49,7 +45,6 @@ func NewRetryStrategy() *RetryStrategy {
 	return &RetryStrategy{
 		MaxAttempts:     RetryMaxAttempts,
 		BaseDelayMS:     RetryBaseDelayMS,
-		Multiplier:      RetryMultiplier,
 		MaxJitterFactor: RetryMaxJitterFactor,
 		NewTimer:        time.NewTimer,
 	}
@@ -64,7 +59,6 @@ func ShouldRetry(status int) bool {
 func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context) (FetchResult, error)) (FetchResult, error) {
 	var lastErr error
 	var lastResult FetchResult
-	delayMS := r.BaseDelayMS
 
 	for attempt := 1; attempt <= r.MaxAttempts; attempt++ {
 		if ctx.Err() != nil {
@@ -87,8 +81,8 @@ func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context)
 		}
 
 		if attempt < r.MaxAttempts {
-			jitter := delayMS * rand.Float64() * r.MaxJitterFactor
-			delay := time.Duration(delayMS+jitter) * time.Millisecond
+			jitter := r.BaseDelayMS * rand.Float64() * r.MaxJitterFactor
+			delay := time.Duration(r.BaseDelayMS+jitter) * time.Millisecond
 			slog.Warn("cdn fetch attempt failed; retrying",
 				"attempt", attempt, "max", r.MaxAttempts, "error", lastErr)
 			t := r.NewTimer(delay)
@@ -98,7 +92,6 @@ func (r *RetryStrategy) Execute(ctx context.Context, fetch func(context.Context)
 				t.Stop()
 				return FetchResult{}, ctx.Err()
 			}
-			delayMS *= r.Multiplier
 		}
 	}
 
