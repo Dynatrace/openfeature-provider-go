@@ -113,6 +113,45 @@ func TestCDNFetcher_InvalidateCache_ForcesUnconditionalFetch(t *testing.T) {
 	assert.False(t, conditional.Load(), "fetch after InvalidateCache must not be conditional")
 }
 
+// A body that never fully arrives must leave no validators behind. The client timeout covers
+// reading the body, so this is the ordinary "slow response, small budget" case, not just a
+// severed connection: caching first would make the very next request revalidate against an ETag
+// whose config was never received, and a 304 reports that as "what you have is current".
+func TestCDNFetcher_BodyReadFailure_LeavesNoValidators(t *testing.T) {
+	var requests atomic.Int32
+	var conditional atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			conditional.Store(true)
+		}
+		w.Header().Set("ETag", `"v2"`)
+		w.Header().Set("Last-Modified", "Thu, 01 Jan 2026 00:00:00 GMT")
+		if requests.Add(1) == 1 {
+			// Promise more than we send, then drop the connection mid-body.
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(200)
+			fmt.Fprint(w, `{"flags":`)
+			// Flush so the client sees the headers (and caches their validators) before the
+			// connection dies; without this the response never reaches it at all.
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"flags":{}}`)
+	}))
+	defer srv.Close()
+
+	f := makeFetcher(srv)
+	_, err := f.Fetch(context.Background())
+	require.Error(t, err, "a truncated body is a failed fetch")
+
+	result, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+	assert.False(t, conditional.Load(), "the failed read must not have cached validators")
+	assert.True(t, result.IsSuccess())
+	assert.Equal(t, `{"flags":{}}`, result.Body)
+}
+
 func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", `"old"`)

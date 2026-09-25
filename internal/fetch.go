@@ -182,6 +182,15 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 			}
 		}
 
+		// Read the body before caching the validators. Storing them first would describe a
+		// config we never received if the read fails (the client timeout covers the body too),
+		// and the retry would then revalidate against them and get a 304 for a config that was
+		// never applied.
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return FetchResult{}, fmt.Errorf("reading cdn response body: %w", readErr)
+		}
+
 		f.cacheMu.Lock()
 		f.headerETag = newETag
 		if lastModifiedParsed {
@@ -189,11 +198,6 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 			f.storedLastModifiedAt = newLastModifiedAt
 		}
 		f.cacheMu.Unlock()
-
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return FetchResult{}, fmt.Errorf("reading cdn response body: %w", readErr)
-		}
 		return FetchResult{Status: status, Body: string(body), ETag: newETag, LastModified: newLastModifiedStr}, nil
 	}
 
