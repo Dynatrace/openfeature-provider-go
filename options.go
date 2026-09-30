@@ -108,15 +108,12 @@ func normalizeOrigin(value, field string) (string, error) {
 	if u.User != nil {
 		return "", fmt.Errorf("%s must not include user info; got %q", field, value)
 	}
-	// u.Host rather than Hostname() + Port(): it preserves the brackets around an
-	// IPv6 literal, which Hostname() strips. User info is already rejected above, so
-	// Host is exactly the host and optional port.
+	// u.Host (not Hostname()+Port()) keeps the IPv6 brackets Hostname() strips; user info is already rejected, so Host is just host[:port]
 	return scheme + "://" + strings.ToLower(u.Host), nil
 }
 
 func publicKeySegment(key string) string {
-	// Only trust the structure if the key has exactly two dots (expected format).
-	// For anything else, redact entirely to avoid leaking an unknown private segment.
+	// only trust the structure with exactly two dots; otherwise redact entirely to avoid leaking an unknown private segment
 	first := strings.Index(key, ".")
 	last := strings.LastIndex(key, ".")
 	if first <= 0 || first == last {

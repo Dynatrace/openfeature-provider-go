@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -53,50 +54,28 @@ func TestRetry_RetriesOn5xx(t *testing.T) {
 	assert.Equal(t, 200, result.Status)
 }
 
-// providers.md §2.4: one retry, not a loop. Recovery past the single retry is the next tick's job.
-func TestRetry_StopsAfterOneRetry(t *testing.T) {
-	assert.Equal(t, 2, RetryMaxAttempts, "spec caps a fetch at an initial attempt plus one retry")
-
-	r := seededRetry()
-	calls := 0
-	_, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
-		calls++
-		return FetchResult{Status: 503}, nil
-	})
-	require.Error(t, err)
-	assert.Equal(t, 2, calls)
+// providers.md 2.3/2.4: non-retryable statuses (4xx incl. 429) end the fetch on the first attempt, returned verbatim.
+func TestRetry_NoRetryOnNonRetryableStatus(t *testing.T) {
+	for _, status := range []int{400, 404, 429} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			r := seededRetry()
+			calls := 0
+			result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
+				calls++
+				return FetchResult{Status: status}, nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, status, result.Status)
+		})
+	}
 }
 
-// providers.md §2.3: a 429 ends the fetch; it is never retried within the same fetch.
-func TestRetry_NoRetryOn429(t *testing.T) {
-	r := seededRetry()
-	calls := 0
-	result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
-		calls++
-		return FetchResult{Status: 429}, nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 1, calls)
-	assert.Equal(t, 429, result.Status)
-}
-
-// providers.md §2.1: max fetch duration must stay under the shortest poll interval (10s).
+// providers.md 2.1: max fetch duration must stay under the shortest poll interval (10s).
 func TestMaxFetchDuration_UnderShortestPollInterval(t *testing.T) {
 	got := MaxFetchDuration()
 	assert.Equal(t, 8120*time.Millisecond, got)
 	assert.Less(t, got, 10*time.Second, "a fetch must never outlive the shortest poll interval")
-}
-
-func TestRetry_NoRetryOn4xx(t *testing.T) {
-	r := seededRetry()
-	calls := 0
-	result, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
-		calls++
-		return FetchResult{Status: 404}, nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 1, calls)
-	assert.Equal(t, 404, result.Status)
 }
 
 func TestRetry_ExhaustsAttempts(t *testing.T) {
@@ -110,15 +89,21 @@ func TestRetry_ExhaustsAttempts(t *testing.T) {
 	assert.Equal(t, RetryMaxAttempts, calls)
 }
 
-func TestRetry_ExhaustsOn5xx(t *testing.T) {
-	r := seededRetry()
-	calls := 0
-	_, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
-		calls++
-		return FetchResult{Status: 500}, nil
-	})
-	require.Error(t, err)
-	assert.Equal(t, RetryMaxAttempts, calls)
+// providers.md 2.4: one retry, not a loop. A retryable status is attempted exactly MaxAttempts times, then fails.
+func TestRetry_ExhaustsRetryableStatus(t *testing.T) {
+	assert.Equal(t, 2, RetryMaxAttempts, "spec caps a fetch at an initial attempt plus one retry")
+	for _, status := range []int{500, 503} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			r := seededRetry()
+			calls := 0
+			_, err := r.Execute(context.Background(), func(_ context.Context) (FetchResult, error) {
+				calls++
+				return FetchResult{Status: status}, nil
+			})
+			require.Error(t, err)
+			assert.Equal(t, RetryMaxAttempts, calls)
+		})
+	}
 }
 
 func TestRetry_SingleBackoffWithinJitterBounds(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 
 const (
 	// RetryMaxAttempts is one initial attempt plus one retry. It is deliberately not a loop:
-	// a fetch must not outlive the shortest poll interval (providers.md §2.1/§2.4), and
+	// a fetch must not outlive the shortest poll interval (providers.md 2.1/2.4), and
 	// recovery beyond the single retry is the next poll tick's job. This applies to the
 	// initial fetch too, which therefore gives up after MaxFetchDuration rather than
 	// retrying for half a minute.
@@ -20,7 +20,7 @@ const (
 )
 
 // MaxFetchDuration is the worst-case wall-clock duration of one fetch: every attempt runs to
-// its timeout and every backoff lands at maximum jitter. providers.md §2.1 makes
+// its timeout and every backoff lands at maximum jitter. providers.md 2.1 makes
 // "MaxFetchDuration < shortest poll interval" an invariant, so two polls can never be in
 // flight at once; any change to the timeout, attempt count or backoff must preserve it.
 func MaxFetchDuration() time.Duration {
@@ -33,7 +33,7 @@ func MaxFetchDuration() time.Duration {
 
 // RetryStrategy applies backoff with jitter for transient HTTP failures. Retries on 5xx and
 // network errors; does not retry 4xx, including 429 (a rate-limit window suppresses later poll
-// ticks instead of holding this fetch open; see providers.md §2.3).
+// ticks instead of holding this fetch open; see providers.md 2.3).
 type RetryStrategy struct {
 	MaxAttempts     int
 	BaseDelayMS     float64

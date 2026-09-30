@@ -15,18 +15,18 @@ import (
 
 const (
 	// RequestTimeout bounds a single attempt. Together with RetryMaxAttempts it keeps
-	// MaxFetchDuration under the shortest poll interval (providers.md §2.1).
+	// MaxFetchDuration under the shortest poll interval (providers.md 2.1).
 	RequestTimeout      = 4 * time.Second
 	DefaultRetryAfterMS = 60_000
 
 	// StatusSkipped marks a fetch that made no request because a Retry-After window was open.
 	// It is not an HTTP status; it is neither a success nor a failure, and reporting it as
-	// either would misrepresent a fetch that learned nothing (providers.md §2.1.1).
+	// either would misrepresent a fetch that learned nothing (providers.md 2.1.1).
 	StatusSkipped = 0
 )
 
 // ErrFetchInFlight reports that another fetch already held the single-flight slot, so this
-// caller's fetch never happened. providers.md §2.1.1 requires a contended poll tick to be
+// caller's fetch never happened. providers.md 2.1.1 requires a contended poll tick to be
 // skipped outright: it is neither a success (which would reset the staleness grace timer) nor
 // a failure (it learned nothing about the CDN).
 var ErrFetchInFlight = errors.New("cdn fetch already in flight")
@@ -56,8 +56,7 @@ type CDNFetcher struct {
 	// 1-buffered channel acting as a ctx-aware mutex (semaphore)
 	sem chan struct{}
 
-	// cacheMu guards the revalidation cache. The single-flight slot already serialises
-	// fetches, but InvalidateCache is called from the state loop while a fetch may be running.
+	// cacheMu guards the revalidation cache; Commit runs from the state loop while a fetch may be running
 	cacheMu              sync.Mutex
 	headerETag           string
 	headerLastModified   string
@@ -80,7 +79,7 @@ func NewCDNFetcher(cdnURL string, client *http.Client) *CDNFetcher {
 
 // Fetch performs a conditional GET with retry, waiting for the single-flight slot when another
 // fetch holds it. Used for the initial fetch, which cannot contend with a poll tick because the
-// polling timer starts only after it returns (providers.md §3.1). Respects ctx cancellation.
+// polling timer starts only after it returns (providers.md 3.1). Respects ctx cancellation.
 func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 	select {
 	case f.sem <- struct{}{}:
@@ -93,7 +92,7 @@ func (f *CDNFetcher) Fetch(ctx context.Context) (FetchResult, error) {
 
 // TryFetch is the non-blocking variant used by the poll ticker. When another fetch holds the
 // single-flight slot it returns ErrFetchInFlight immediately instead of queueing behind it and
-// issuing a redundant second request once the slot frees (providers.md §2.1.1).
+// issuing a redundant second request once the slot frees (providers.md 2.1.1).
 func (f *CDNFetcher) TryFetch(ctx context.Context) (FetchResult, error) {
 	select {
 	case f.sem <- struct{}{}:
@@ -104,17 +103,18 @@ func (f *CDNFetcher) TryFetch(ctx context.Context) (FetchResult, error) {
 	return f.fetchHoldingSlot(ctx)
 }
 
-// InvalidateCache drops the stored ETag and Last-Modified so the next fetch is unconditional.
-//
-// Call it whenever a fetched body could not be applied. The validators are stored as soon as a
-// 2xx arrives, before the caller has judged the body, so leaving them in place makes the next
-// fetch revalidate to 304 ("what you have is current") for a config that was never loaded.
-func (f *CDNFetcher) InvalidateCache() {
+// Commit remembers a response's ETag/Last-Modified after the caller has applied its body, so the
+// next fetch can send a conditional GET. Remembering only post-apply means an empty or rejected body
+// never leaves headers that would 304 a config the store never took (providers.md 2.1.1).
+func (f *CDNFetcher) Commit(etag, lastModified string) {
 	f.cacheMu.Lock()
 	defer f.cacheMu.Unlock()
-	f.headerETag = ""
-	f.headerLastModified = ""
-	f.storedLastModifiedAt = time.Time{}
+	f.headerETag = etag
+	// unparseable/absent Last-Modified leaves the stored one intact, matching the prior 2xx behavior
+	if t, ok := ParseHTTPDate(lastModified); ok {
+		f.headerLastModified = lastModified
+		f.storedLastModifiedAt = t
+	}
 }
 
 // fetchHoldingSlot runs a fetch; callers must already hold the single-flight slot.
@@ -170,7 +170,7 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 	newLastModifiedStr := resp.Header.Get("Last-Modified")
 
 	if status >= http.StatusOK && status < http.StatusMultipleChoices {
-		// Stale-node defense: reject 200 if Last-Modified is not strictly newer (providers.md §5.7).
+		// Stale-node defense: reject 200 if Last-Modified is not strictly newer (providers.md 5.7).
 		var newLastModifiedAt time.Time
 		var lastModifiedParsed bool
 		if newLastModifiedStr != "" {
@@ -182,22 +182,11 @@ func (f *CDNFetcher) doFetch(ctx context.Context) (FetchResult, error) {
 			}
 		}
 
-		// Read the body before caching the validators. Storing them first would describe a
-		// config we never received if the read fails (the client timeout covers the body too),
-		// and the retry would then revalidate against them and get a 304 for a config that was
-		// never applied.
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			return FetchResult{}, fmt.Errorf("reading cdn response body: %w", readErr)
 		}
-
-		f.cacheMu.Lock()
-		f.headerETag = newETag
-		if lastModifiedParsed {
-			f.headerLastModified = newLastModifiedStr
-			f.storedLastModifiedAt = newLastModifiedAt
-		}
-		f.cacheMu.Unlock()
+		// the ETag/Last-Modified ride back in the result; the caller stores them via Commit only after the body applies
 		return FetchResult{Status: status, Body: string(body), ETag: newETag, LastModified: newLastModifiedStr}, nil
 	}
 

@@ -80,17 +80,16 @@ func TestCDNFetcher_RateLimit_SkipsFetch(t *testing.T) {
 
 	result, err := f.Fetch(context.Background())
 	require.NoError(t, err)
-	// No request was made, so the tick is a skip, not a server 429: the caller must be able to
-	// tell "we chose not to ask" from "the CDN told us to back off".
+	// no request was made, so this is a skip, not a server 429: distinguish "we chose not to ask" from "back off"
 	assert.True(t, result.IsSkipped())
 	assert.False(t, result.IsRateLimited())
 	assert.Equal(t, 0, calls)
 }
 
-// The validators are stored as soon as a 2xx lands, before the caller has judged the body. If a
-// rejected body left them in place the next fetch would revalidate to 304 for a config that was
-// never applied, and the caller would read that as "what you have is current".
-func TestCDNFetcher_InvalidateCache_ForcesUnconditionalFetch(t *testing.T) {
+// The ETag/Last-Modified are not stored at fetch time: only Commit (called after the caller applies
+// the body) makes the next fetch conditional. A body that is empty or rejected is never committed, so
+// it can never leave headers that 304 a config the store never took.
+func TestCDNFetcher_ValidatorsStoredOnlyAfterCommit(t *testing.T) {
 	var conditional atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
@@ -104,13 +103,19 @@ func TestCDNFetcher_InvalidateCache_ForcesUnconditionalFetch(t *testing.T) {
 	defer srv.Close()
 
 	f := makeFetcher(srv)
-	_, err := f.Fetch(context.Background())
+	r1, err := f.Fetch(context.Background())
 	require.NoError(t, err)
 
-	f.InvalidateCache()
+	// not committed yet: a second fetch must still be unconditional
 	_, err = f.Fetch(context.Background())
 	require.NoError(t, err)
-	assert.False(t, conditional.Load(), "fetch after InvalidateCache must not be conditional")
+	assert.False(t, conditional.Load(), "fetch before Commit must not be conditional")
+
+	// after Commit the next fetch revalidates
+	f.Commit(r1.ETag, r1.LastModified)
+	_, err = f.Fetch(context.Background())
+	require.NoError(t, err)
+	assert.True(t, conditional.Load(), "fetch after Commit must send conditional headers")
 }
 
 // A body that never fully arrives must leave no validators behind. The client timeout covers
@@ -131,8 +136,7 @@ func TestCDNFetcher_BodyReadFailure_LeavesNoValidators(t *testing.T) {
 			w.Header().Set("Content-Length", "4096")
 			w.WriteHeader(200)
 			fmt.Fprint(w, `{"flags":`)
-			// Flush so the client sees the headers (and caches their validators) before the
-			// connection dies; without this the response never reaches it at all.
+			// flush so the client sees the headers before the connection dies; without it the response never reaches the client
 			w.(http.Flusher).Flush()
 			panic(http.ErrAbortHandler)
 		}
@@ -152,23 +156,37 @@ func TestCDNFetcher_BodyReadFailure_LeavesNoValidators(t *testing.T) {
 	assert.Equal(t, `{"flags":{}}`, result.Body)
 }
 
-func TestCDNFetcher_StaleNodeDefense(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("ETag", `"old"`)
-		w.Header().Set("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
-		w.WriteHeader(200)
-		fmt.Fprint(w, `{"flags":{}}`)
-	}))
-	defer srv.Close()
+// A 200 whose Last-Modified is not strictly newer than the stored one is a stale node; both an
+// older and an equal timestamp must be treated as 304 (the equal case is the boundary the check turns on).
+func TestCDNFetcher_StaleNodeDefense_RejectsNotNewer(t *testing.T) {
+	const stored = "Thu, 01 Jan 2026 00:00:00 GMT"
+	cases := []struct {
+		name     string
+		serverLM string
+	}{
+		{"older", "Wed, 01 Jan 2025 00:00:00 GMT"},
+		{"equal", stored},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("ETag", `"old"`)
+				w.Header().Set("Last-Modified", tc.serverLM)
+				w.WriteHeader(200)
+				fmt.Fprint(w, `{"flags":{}}`)
+			}))
+			defer srv.Close()
 
-	f := makeFetcher(srv)
-	storedTime, _ := ParseHTTPDate("Thu, 01 Jan 2026 00:00:00 GMT")
-	f.storedLastModifiedAt = storedTime
-	f.headerLastModified = "Thu, 01 Jan 2026 00:00:00 GMT"
+			f := makeFetcher(srv)
+			storedTime, _ := ParseHTTPDate(stored)
+			f.storedLastModifiedAt = storedTime
+			f.headerLastModified = stored
 
-	result, err := f.Fetch(context.Background())
-	require.NoError(t, err)
-	assert.True(t, result.IsNotModified(), "stale-node defense should return 304, got %d", result.Status)
+			result, err := f.Fetch(context.Background())
+			require.NoError(t, err)
+			assert.True(t, result.IsNotModified(), "a 200 whose Last-Modified is not newer must be treated as 304, got %d", result.Status)
+		})
+	}
 }
 
 // TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag verifies that a 200
@@ -188,6 +206,7 @@ func TestCDNFetcher_2xx_UnparseableLastModified_StillUpdatesETag(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.IsSuccess())
 
+	f.Commit(result.ETag, result.LastModified)
 	gotETag := f.headerETag
 	gotLM := f.headerLastModified
 	assert.Equal(t, `"new-etag"`, gotETag, "ETag must update even when Last-Modified is unparseable")
@@ -236,12 +255,21 @@ func TestCDNFetcher_ContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-func TestParseRetryAfterDuration_Seconds(t *testing.T) {
-	assert.Equal(t, 30*time.Second, ParseRetryAfterDuration("30", time.Now()))
-}
-
-func TestParseRetryAfterDuration_Empty(t *testing.T) {
-	assert.Equal(t, DefaultRetryAfterMS*time.Millisecond, ParseRetryAfterDuration("", time.Now()))
+func TestParseRetryAfterDuration(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"seconds", "30", 30 * time.Second},
+		{"empty", "", DefaultRetryAfterMS * time.Millisecond},
+		{"invalid", "not-a-number", DefaultRetryAfterMS * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ParseRetryAfterDuration(tc.header, now))
+		})
+	}
 }
 
 func TestFetchResult_Predicates(t *testing.T) {
@@ -252,7 +280,7 @@ func TestFetchResult_Predicates(t *testing.T) {
 	assert.False(t, (FetchResult{Status: 500}).IsSuccess())
 }
 
-// providers.md §2.1.1: at most one CDN fetch in flight. A contended caller is turned away
+// providers.md 2.1.1: at most one CDN fetch in flight. A contended caller is turned away
 // with ErrFetchInFlight rather than issuing a second request.
 func TestCDNFetcher_TryFetch_SkipsWhenFetchInFlight(t *testing.T) {
 	releaseChan := make(chan struct{})
