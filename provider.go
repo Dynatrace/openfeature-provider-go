@@ -58,7 +58,7 @@ type DynatraceProvider struct {
 	gracePeriod  time.Duration
 
 	state             atomic.Pointer[openfeature.State]
-	successChan       chan string
+	successChan       chan internal.FetchResult
 	failureChan       chan string
 	pollCancel        context.CancelFunc
 	pollDoneChan      <-chan struct{}
@@ -125,7 +125,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		eventsChan:   make(chan openfeature.Event, channelBufferSize),
 		pollInterval: defaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
-		successChan:  make(chan string, channelBufferSize),
+		successChan:  make(chan internal.FetchResult, channelBufferSize),
 		failureChan:  make(chan string, channelBufferSize),
 	}
 	p.setState(openfeature.NotReadyState)
@@ -137,12 +137,11 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	if err != nil {
 		return nil, err
 	}
-	// Only validate when using the default HTTP client; a custom client implies
-	// the caller controls the timeout (e.g. tests with a local httptest server).
-	if p.httpClient == nil && p.pollInterval <= internal.RequestTimeout {
+	// a fetch must never outlive its poll interval (providers.md 2.1); only checked with the default client, since a custom one owns its timeout
+	if p.httpClient == nil && p.pollInterval <= internal.MaxFetchDuration() {
 		return nil, fmt.Errorf(
-			"pollInterval (%s) must be greater than the request timeout (%s)",
-			p.pollInterval, internal.RequestTimeout,
+			"pollInterval (%s) must be greater than the worst-case fetch duration (%s)",
+			p.pollInterval, internal.MaxFetchDuration(),
 		)
 	}
 	p.config = cfg
@@ -177,12 +176,43 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook {
 }
 
 // Init fetches the initial flag configuration and starts polling.
+//
+// A failed initial fetch is not terminal. The polling timer, state loop and metrics flusher
+// start either way, so the provider recovers on a later tick exactly like any other fetch
+// failure (providers.md 2.4). Init still returns the error, which the SDK reports as a plain
+// ERROR; auth failures are no exception, since 401/403 are recoverable once a key is rotated
+// or a backend fault clears (providers.md 4). A malformed key never reaches this point: it is
+// rejected in NewProvider, before any network activity.
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
+	initErr := p.loadInitialConfig()
+	if initErr != nil {
+		// nothing to undo: ETag/Last-Modified are stored only after a body applies, and this one did not
+		slog.Error("initial cdn fetch failed; starting in ERROR and recovering on the polling timer",
+			"key", p.config.publicKey(), "error", initErr)
+	} else {
+		p.setState(openfeature.ReadyState)
+		p.updateMetricsVersionFromFlagSet()
+	}
+
+	p.startBackgroundLoops()
+
+	if initErr != nil {
+		return initErr
+	}
+	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
+	return nil
+}
+
+// loadInitialConfig performs the initial fetch and applies the config it returns.
+func (p *DynatraceProvider) loadInitialConfig() error {
 	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
 		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
+	}
+	if result.IsSkipped() {
+		return fmt.Errorf("initial cdn fetch was skipped")
 	}
 	if !result.IsSuccess() {
 		return fmt.Errorf("initial cdn fetch returned HTTP %d", result.Status)
@@ -190,30 +220,32 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	if result.Body == "" {
 		return fmt.Errorf("initial cdn response body was empty")
 	}
-
 	if setErr := p.evaluator.SetState(flagdsync.DataSync{
 		FlagData: result.Body,
 		Source:   p.config.cdnURL,
 	}); setErr != nil {
 		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
+	// applied: remember this response's ETag/Last-Modified so the first poll is conditional
+	p.fetcher.Commit(result.ETag, result.LastModified)
+	return nil
+}
 
-	p.setState(openfeature.ReadyState)
-	p.updateMetricsVersionFromFlagSet()
-
+// startBackgroundLoops starts the state loop, the polling timer and the metrics flusher. The
+// polling timer starts only once the initial fetch has settled, so it never contends with it
+// (providers.md 3.1).
+func (p *DynatraceProvider) startBackgroundLoops() {
 	p.stateLoopDoneChan = make(chan struct{})
 	go p.stateLoop()
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	p.pollCancel = pollCancel
-	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	// TryFetch, not Fetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
+	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.TryFetch, p.successChan, p.failureChan, p.pollInterval)
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
 	p.metricsDoneChan = p.metricsFlusher.Run(metricsCtx)
-
-	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
-	return nil
 }
 
 // Shutdown stops polling and transitions to NOT_READY. Idempotent.
@@ -306,13 +338,16 @@ func resolve[T, U any](
 // new config it seals the current metrics batch under the old version and flushes it, so
 // pre-rotation counts are reported against the version under which they occurred; the live
 // version is then bumped on the now-empty aggregator.
-func (p *DynatraceProvider) commitFlags(payload string) ([]string, error) {
+func (p *DynatraceProvider) commitFlags(result internal.FetchResult) ([]string, error) {
 	p.metricsFlusher.EnqueueSealedBatch(p.metricsAggregator.Drain())
 
 	before := flagsByKey(p.flagStore)
-	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: payload, Source: p.config.cdnURL}); err != nil {
+	if err := p.evaluator.SetState(flagdsync.DataSync{FlagData: result.Body, Source: p.config.cdnURL}); err != nil {
+		// not applied, so its ETag/Last-Modified are not stored; the next poll refetches instead of 304-ing
 		return nil, err
 	}
+	// applied: remember this body's ETag/Last-Modified so the next poll can revalidate to 304
+	p.fetcher.Commit(result.ETag, result.LastModified)
 	after := flagsByKey(p.flagStore)
 
 	p.updateMetricsVersionFromFlagSet()
@@ -417,8 +452,7 @@ func (p *DynatraceProvider) stateLoop() {
 		close(p.stateLoopDoneChan)
 	}()
 
-	// fail handles a poll failure or a commit failure. From any non-Ready state
-	// it just logs; from Ready it transitions to Stale, emits, and arms grace.
+	// fail handles a poll or commit failure: from non-Ready it just logs; from Ready it goes Stale, emits, and arms grace
 	fail := func(reason string) {
 		if prev := p.getState(); prev != openfeature.ReadyState {
 			slog.Warn("poll failed", "state", prev, "reason", reason)
@@ -433,13 +467,13 @@ func (p *DynatraceProvider) stateLoop() {
 
 	for {
 		select {
-		case body, ok := <-p.successChan:
+		case result, ok := <-p.successChan:
 			if !ok {
 				return
 			}
 			var changed []string
-			if body != "" {
-				keys, err := p.commitFlags(body)
+			if result.Body != "" {
+				keys, err := p.commitFlags(result)
 				if err != nil {
 					fail("failed to store flags: " + err.Error())
 					continue
@@ -447,7 +481,8 @@ func (p *DynatraceProvider) stateLoop() {
 				changed = keys
 			}
 			stopGrace()
-			if prev := p.getState(); prev == openfeature.StaleState || prev == openfeature.ErrorState {
+			// NotReady covers a failed init: the first successful poll brings the provider up, so it must emit PROVIDER_READY
+			if prev := p.getState(); prev != openfeature.ReadyState {
 				p.setState(openfeature.ReadyState)
 				slog.Info("dynatrace provider recovered to READY", "previous", prev)
 				p.emit(openfeature.ProviderReady, openfeature.ProviderEventDetails{Message: "recovered"})

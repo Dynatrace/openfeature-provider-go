@@ -20,13 +20,18 @@ const minPollInterval = time.Millisecond
 //
 // The ticker cadence is anchored to request initiation: time.NewTicker sends
 // ticks at regular wall-clock intervals regardless of how long fetchFlags takes,
-// so the effective cadence is fixed-rate as long as polls finish well within
-// the interval (10s interval, 5s per-request timeout, 5 retries ~1.6s worst
-// case in production; see providers.md §2.1).
+// so the effective cadence is fixed-rate (providers.md 2.1).
+//
+// fetchFlags is expected to be single-flight and non-blocking under contention
+// (CDNFetcher.TryFetch). A tick that finds a fetch already running is skipped and has no
+// observable effect: it emits on neither channel, so it cannot reset the caller's staleness
+// grace timer (providers.md 2.1.1). In production the 2.1 bound rules out poll-versus-poll
+// contention anyway; the skip is what makes a violation of it harmless rather than silently
+// wrong.
 func Poll(
 	ctx context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
-	successChan chan<- string,
+	successChan chan<- FetchResult,
 	failureChan chan<- string,
 	interval time.Duration,
 ) <-chan struct{} {
@@ -55,13 +60,18 @@ func Poll(
 func pollOnce(
 	ctx context.Context,
 	fetchFlags func(context.Context) (FetchResult, error),
-	successChan chan<- string,
+	successChan chan<- FetchResult,
 	failureChan chan<- string,
 ) {
 	result, err := fetchFlags(ctx)
 
 	if ctx.Err() != nil {
 		slog.Debug("poll: cancelled; discarding result")
+		return
+	}
+
+	if errors.Is(err, ErrFetchInFlight) {
+		slog.Debug("poll: fetch already in flight; skipping tick")
 		return
 	}
 
@@ -75,14 +85,20 @@ func pollOnce(
 		return
 	}
 
+	// No request was made, so the tick is neither a success nor a failure (providers.md 2.1.1).
+	if result.IsSkipped() {
+		slog.Debug("poll: inside Retry-After window; skipping tick")
+		return
+	}
+
 	if result.IsNotModified() {
 		slog.Debug("poll: flags not modified")
-		emit(ctx, successChan, "")
+		emit(ctx, successChan, result)
 		return
 	}
 
 	if result.IsRateLimited() {
-		slog.Debug("poll: rate limited; serving cached values")
+		slog.Debug("poll: cdn returned 429; serving cached values")
 		return
 	}
 
@@ -98,10 +114,13 @@ func pollOnce(
 		return
 	}
 
-	emit(ctx, successChan, result.Body)
+	emit(ctx, successChan, result)
 }
 
-func emit(ctx context.Context, targetChan chan<- string, msg string) {
+// pollMsg is the type set emit delivers: a FetchResult on successChan or a reason string on failureChan.
+type pollMsg interface{ string | FetchResult }
+
+func emit[T pollMsg](ctx context.Context, targetChan chan<- T, msg T) {
 	select {
 	case targetChan <- msg:
 	case <-ctx.Done():

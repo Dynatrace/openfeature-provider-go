@@ -2,12 +2,15 @@ package dynatrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Dynatrace/openfeature-provider-go/internal"
 	openfeature "github.com/open-feature/go-sdk/openfeature"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,21 +66,24 @@ func TestProvider_Init_Success(t *testing.T) {
 	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
 	defer p.Shutdown()
 
-	// PROVIDER_READY is synthesized by the SDK after Init returns; the provider
-	// does not emit it on the channel (matching Java provider behaviour).
+	// PROVIDER_READY is synthesized by the SDK after Init returns; the provider does not emit it on the channel (matching Java)
 	assert.True(t, p.isReady())
 }
 
 func TestProvider_Init_Failure_Non2xx(t *testing.T) {
 	srv := newTestServer("", 503)
 	defer srv.Close()
-	require.Error(t, newTestProvider(t, srv).Init(openfeature.NewEvaluationContext("", nil)))
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	p.Shutdown()
 }
 
 func TestProvider_Init_Failure_EmptyBody(t *testing.T) {
 	srv := newTestServer("", 200)
 	defer srv.Close()
-	require.Error(t, newTestProvider(t, srv).Init(openfeature.NewEvaluationContext("", nil)))
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	p.Shutdown()
 }
 
 func TestProvider_BooleanEvaluation_BeforeInit(t *testing.T) {
@@ -245,9 +251,7 @@ func TestProvider_ConfigChange_PopulatesFlagKeys(t *testing.T) {
     "my-string": {"state": "ENABLED", "variants": {"hello": "world"}, "defaultVariant": "hello"}
   }
 }`
-	// my-bool: defaultVariant flipped (modified)
-	// my-string: removed
-	// my-other: added
+	// diff vs initial: my-bool modified (defaultVariant flipped), my-string removed, my-other added
 	const updatedJSON = `{
   "flags": {
     "my-bool":  {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "off"},
@@ -303,9 +307,7 @@ func TestProvider_ConfigChange_PopulatesFlagKeys(t *testing.T) {
 // same config does NOT fire PROVIDER_CONFIG_CHANGE. PollingManager filters out
 // empty changed-key slices, so identical-config polls are silent.
 func TestProvider_ConfigChange_NoOpPoll_NoEvent(t *testing.T) {
-	// Server always returns the same body but with a different ETag so the client
-	// can't short-circuit via 304. This forces storeFlags to run, which then
-	// produces an empty diff -> no event.
+	// same body, different ETag each time so the client can't 304; forces storeFlags to run, which then diffs empty -> no event
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		callCount++
@@ -359,17 +361,66 @@ func TestCommitFlags_ReturnsChangedKeys(t *testing.T) {
 	p, err := NewProvider(validSDKKey)
 	require.NoError(t, err)
 
-	keys, err := p.commitFlags(initialJSON)
+	keys, err := p.commitFlags(internal.FetchResult{Body: initialJSON})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"a", "b"}, keys, "first commit reports all flags as added")
 
-	keys, err = p.commitFlags(initialJSON)
+	keys, err = p.commitFlags(internal.FetchResult{Body: initialJSON})
 	require.NoError(t, err)
 	assert.Empty(t, keys, "re-applying the same config produces no changed keys")
 
-	keys, err = p.commitFlags(updatedJSON)
+	keys, err = p.commitFlags(internal.FetchResult{Body: updatedJSON})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"a", "b", "c"}, keys, "modified+removed+added are all reported")
+}
+
+// An empty 2xx body must not leave validators behind. If it did, the next conditional poll could
+// 304 and be read as success, moving a STALE provider back to READY over a config never applied.
+// Here the server 304s only against the empty body's ETag ("v2"); staging never commits it, so the
+// provider keeps sending the good init ETag ("v1"), keeps failing on the empty body, and degrades to
+// ERROR instead of falsely recovering.
+func TestProvider_EmptyBodyDoesNotFalselyRecover(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 { // init: good config
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(200)
+			fmt.Fprint(w, testFlagJSON)
+			return
+		}
+		if r.Header.Get("If-None-Match") == `"v2"` { // would 304 only the empty body's validator
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set("ETag", `"v2"`) // every poll serves an empty 200
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	p, err := NewProvider(validSDKKey,
+		WithConfigOrigin(srv.URL),
+		WithHTTPClient(srv.Client()),
+		withPollInterval(100*time.Millisecond),
+	)
+	require.NoError(t, err)
+	p.gracePeriod = time.Second
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.EventChannel():
+			switch e.EventType {
+			case openfeature.ProviderReady:
+				t.Fatal("empty body falsely recovered the provider to READY via a phantom 304")
+			case openfeature.ProviderError:
+				return // correct: stayed STALE and degraded to ERROR
+			}
+		case <-deadline:
+			t.Fatal("provider never degraded to ERROR")
+		}
+	}
 }
 
 // TestCommitFlags_InvalidJSON_ReturnsError verifies commitFlags surfaces parse
@@ -378,6 +429,161 @@ func TestCommitFlags_InvalidJSON_ReturnsError(t *testing.T) {
 	p, err := NewProvider(validSDKKey)
 	require.NoError(t, err)
 
-	_, err = p.commitFlags(`{"flags": "not-an-object"}`)
+	_, err = p.commitFlags(internal.FetchResult{Body: `{"flags": "not-an-object"}`})
 	require.Error(t, err)
+}
+
+// providers.md 2.1.1: poll ticks skipped because a fetch is in flight must not reset the
+// staleness grace timer, so a STALE provider still degrades to ERROR when the grace period
+// expires during a long-running fetch.
+func TestProvider_SkippedTicks_DoNotResetGraceTimer(t *testing.T) {
+	var calls atomic.Int32
+	blockChan := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch n := calls.Add(1); {
+		case n == 1: // initial fetch
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(200)
+			fmt.Fprint(w, testFlagJSON)
+		case n <= 3: // first poll: both attempts fail, arming the grace timer
+			w.WriteHeader(503)
+		default: // second poll: holds the single-flight slot, so later ticks are skipped
+			select {
+			case <-blockChan:
+			case <-r.Context().Done():
+			}
+		}
+	}))
+	// Teardown runs LIFO: unblock the stalled handler before srv.Close waits on it.
+	defer srv.Close()
+	defer close(blockChan)
+
+	p, err := NewProvider(validSDKKey,
+		WithConfigOrigin(srv.URL),
+		WithHTTPClient(srv.Client()),
+		withPollInterval(100*time.Millisecond),
+	)
+	require.NoError(t, err)
+	p.gracePeriod = time.Second
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.EventChannel():
+			if e.EventType == openfeature.ProviderError {
+				assert.Greater(t, calls.Load(), int32(3), "a poll must have been in flight")
+				assert.Less(t, calls.Load(), int32(10),
+					"ticks contending with the in-flight fetch must not reach the CDN")
+				return
+			}
+		case <-deadline:
+			t.Fatal("grace period did not expire: skipped ticks appear to have reset it")
+		}
+	}
+}
+
+// initFailureThenRecoveryServer fails every request until flip is closed, then serves config.
+func initFailureThenRecoveryServer(status int, flipChan <-chan struct{}, calls *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		select {
+		case <-flipChan:
+			w.Header().Set("ETag", `"v1"`)
+			w.WriteHeader(200)
+			fmt.Fprint(w, testFlagJSON)
+		default:
+			w.WriteHeader(status)
+		}
+	}))
+}
+
+// providers.md 2.4: a failed initial fetch is not terminal. The polling timer still runs, so
+// the provider recovers without operator action once the CDN comes back.
+func TestProvider_Init_Failure_RecoversOnPollingTimer(t *testing.T) {
+	var calls atomic.Int32
+	flipChan := make(chan struct{})
+	srv := initFailureThenRecoveryServer(503, flipChan, &calls)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)), "init must surface the failure")
+	defer p.Shutdown()
+	assert.False(t, p.isReady(), "no config means evaluations report PROVIDER_NOT_READY")
+
+	close(flipChan) // CDN recovers
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.EventChannel():
+			if e.EventType == openfeature.ProviderReady {
+				assert.True(t, p.isReady())
+				assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value,
+					"recovered provider serves the fetched config")
+				return
+			}
+		case <-deadline:
+			t.Fatal("provider never recovered: polling did not start after a failed init")
+		}
+	}
+}
+
+// providers.md 4: auth errors are never fatal, on initialization included.
+func TestProvider_Init_Failure_401_IsNotFatal(t *testing.T) {
+	var calls atomic.Int32
+	flipChan := make(chan struct{})
+	srv := initFailureThenRecoveryServer(401, flipChan, &calls)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	err := p.Init(openfeature.NewEvaluationContext("", nil))
+	require.Error(t, err)
+	defer p.Shutdown()
+
+	// The SDK only reports FATAL for a ProviderInitError carrying ProviderFatalCode.
+	var initErr *openfeature.ProviderInitError
+	assert.False(t, errors.As(err, &initErr), "a 401 must not produce a fatal init error")
+
+	before := calls.Load()
+	assert.Eventually(t, func() bool { return calls.Load() > before }, 3*time.Second, 50*time.Millisecond,
+		"provider must keep retrying after a 401 on init")
+
+	close(flipChan)
+	assert.Eventually(t, p.isReady, 5*time.Second, 50*time.Millisecond,
+		"provider must recover once the auth failure clears")
+}
+
+// A body that arrives 200 but cannot be applied must not leave its validators cached: the next
+// poll would then revalidate to 304, and a 304 is reported as a success, which would bring the
+// provider up READY with no flags loaded.
+func TestProvider_RejectedConfig_DoesNotCacheValidators(t *testing.T) {
+	var serveValid atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			// The provider never applied the first body, so it must not ask us to revalidate it.
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Last-Modified", "Thu, 01 Jan 2026 00:00:00 GMT")
+		w.WriteHeader(200)
+		if serveValid.Load() {
+			fmt.Fprint(w, testFlagJSON)
+			return
+		}
+		fmt.Fprint(w, `{"flags": "not-an-object"}`)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.Error(t, p.Init(openfeature.NewEvaluationContext("", nil)), "an unusable config fails init")
+	defer p.Shutdown()
+
+	serveValid.Store(true)
+	assert.Eventually(t, p.isReady, 5*time.Second, 50*time.Millisecond,
+		"provider must refetch unconditionally and recover on the valid config")
+	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
 }

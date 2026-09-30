@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dynatrace/openfeature-provider-go/internal"
 	openfeature "github.com/open-feature/go-sdk/openfeature"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,8 +116,7 @@ func TestProvider_MetricsOriginOverrideRoutesDelivery(t *testing.T) {
 	override := newMetricsRecorder()
 	defer override.srv.Close()
 
-	// WithMetricsOrigin is applied in NewProvider, taking precedence over the derived geo default.
-	// httptest.Server.URL is an origin; the provider appends /v1/metrics.
+	// WithMetricsOrigin (applied in NewProvider) beats the derived geo default; httptest URL is an origin, provider appends /v1/metrics
 	p, err := NewProvider(validSDKKey,
 		WithConfigOrigin(cdn.URL),
 		WithHTTPClient(cdn.Client()),
@@ -174,7 +174,7 @@ func TestProvider_RotationSealsUnderOldVersion(t *testing.T) {
 
 	// Record under cfg-1, then rotate to cfg-2 via the poller's store callback.
 	p.metricsAggregator.Record("my-bool", "on", "static", "", 100, "")
-	_, err := p.commitFlags(versionedFlagJSONv2)
+	_, err := p.commitFlags(internal.FetchResult{Body: versionedFlagJSONv2})
 	require.NoError(t, err)
 
 	metrics.waitForHit(t) // rotation triggers an out-of-band flush

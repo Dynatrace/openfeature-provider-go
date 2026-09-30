@@ -23,14 +23,13 @@ func TestParseSDKKey_LeadingTrailingWhitespace(t *testing.T) {
 	assert.NotEmpty(t, cfg.cdnURL)
 }
 
-func TestParseSDKKey_Blank(t *testing.T) {
-	_, err := parseSDKKey("   ", "", "")
-	require.Error(t, err)
-}
-
-func TestParseSDKKey_Empty(t *testing.T) {
-	_, err := parseSDKKey("", "", "")
-	require.Error(t, err)
+func TestParseSDKKey_BlankOrEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, key string }{{"empty", ""}, {"blank", "   "}} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSDKKey(tc.key, "", "")
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestParseSDKKey_InvalidFormat(t *testing.T) {
