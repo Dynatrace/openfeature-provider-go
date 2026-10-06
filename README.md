@@ -80,6 +80,16 @@ A runnable example lives in [`examples`](examples).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Running the e2e tests
+
+The cross-provider Gherkin suite lives in the [`fm-provider-test-harness`](https://github.com/Dynatrace/fm-provider-test-harness) submodule and runs against its mock server via Testcontainers, so Docker must be running:
+
+```bash
+make e2e
+```
+
+Set `MOCKSERVER_IMAGE` to run against a locally built mock server image.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).

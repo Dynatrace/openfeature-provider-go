@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/open-feature/flagd/core v0.16.2
-	github.com/open-feature/go-sdk v1.17.1
+	github.com/open-feature/go-sdk v1.17.2
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
 )

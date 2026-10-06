@@ -23,6 +23,21 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            e2e/go.sum
+      - name: Run E2E tests
+        run: make e2e
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
