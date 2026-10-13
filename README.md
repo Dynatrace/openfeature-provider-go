@@ -88,7 +88,7 @@ The cross-provider Gherkin suite lives in the [`fm-provider-test-harness`](https
 make e2e
 ```
 
-Set `MOCKSERVER_IMAGE` to run against a locally built mock server image.
+Set `SKIP_HARNESS_UPDATE=1` to keep a local harness checkout, and `MOCKSERVER_IMAGE` to run against a locally built mock server image.
 
 ## License
 

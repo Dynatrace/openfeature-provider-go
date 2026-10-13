@@ -26,10 +26,9 @@ import (
 )
 
 const (
-	providerName        = "dynatrace"
-	defaultPollInterval = 10 * time.Second
-	defaultGracePeriod  = 60 * time.Second
-	channelBufferSize   = 8
+	providerName       = "dynatrace"
+	defaultGracePeriod = 60 * time.Second
+	channelBufferSize  = 8
 	// versionMetadataKey is the flag-set metadata key carrying the config version.
 	versionMetadataKey = "version"
 	// modulePath is this module's import path, used to resolve the SDK version at runtime.
@@ -123,7 +122,7 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		evaluator:    eval,
 		flagStore:    flagStore,
 		eventsChan:   make(chan openfeature.Event, channelBufferSize),
-		pollInterval: defaultPollInterval,
+		pollInterval: internal.DefaultPollInterval,
 		gracePeriod:  defaultGracePeriod,
 		successChan:  make(chan internal.FetchResult, channelBufferSize),
 		failureChan:  make(chan string, channelBufferSize),

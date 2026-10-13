@@ -5,7 +5,7 @@ test:
 
 # requires docker; runs the fm-provider-test-harness gherkin suite against its mock server
 e2e:
-	git submodule update --init fm-provider-test-harness
+	[ -n "$$SKIP_HARNESS_UPDATE" ] || git submodule update --init fm-provider-test-harness
 	cd e2e && go test -count=1 -timeout 20m ./...
 
 vet:

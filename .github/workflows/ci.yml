@@ -20,6 +20,9 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      - name: go vet (e2e)
+        run: go vet ./...
+        working-directory: e2e
       - name: go test
         run: go test -race -count=1 ./...
 
@@ -51,6 +54,10 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: e2e
 
   lint-markdown:
     name: Lint Markdown

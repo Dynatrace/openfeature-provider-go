@@ -24,8 +24,8 @@ const (
 	baseKey = "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
 	// shared flag configuration fixtures from the harness submodule
 	flagsDir = harnessDir + "/flags"
-	// matches the provider's defaultPollInterval; a drift fails the cadence scenarios loudly
-	pollInterval = 10 * time.Second
+	// the provider's poll cadence
+	pollInterval = internal.DefaultPollInterval
 	// bound on one CDN attempt (KB section 2.1)
 	requestTimeout = internal.RequestTimeout
 	// longer than the poll cadence, so a refresh is observed
