@@ -8,7 +8,11 @@ import (
 	"time"
 )
 
-const minPollInterval = time.Millisecond
+const (
+	// DefaultPollInterval is the provider's poll cadence unless overridden.
+	DefaultPollInterval = 10 * time.Second
+	minPollInterval     = time.Millisecond
+)
 
 // Poll launches a goroutine that drives periodic flag-config polling. It runs until ctx is
 // cancelled, then returns. Returns a done channel that closes when the goroutine exits; the

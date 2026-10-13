@@ -20,8 +20,26 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      - name: go vet (e2e)
+        run: go vet ./...
+        working-directory: e2e
       - name: go test
         run: go test -race -count=1 ./...
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            e2e/go.sum
+      - name: Run E2E tests
+        run: make e2e
 
   lint:
     name: Lint
@@ -36,6 +54,10 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: e2e
 
   lint-markdown:
     name: Lint Markdown
