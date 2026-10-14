@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.2-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.1.1-alpha...v0.1.2-alpha) (2026-10-14)
+
+
+### ✨ New Features
+
+* bound cdn fetch duration and skip poll ticks that contend with an in-flight fetch ([#21](https://github.com/Dynatrace/openfeature-provider-go/issues/21)) ([60d2da4](https://github.com/Dynatrace/openfeature-provider-go/commit/60d2da489779ee742c6b35bd889c67eccfc8bfeb))
+
+
+### 🧹 Chore
+
+* upgrade GitHub Actions to Node 24, ref: ASDY-27739 ([#18](https://github.com/Dynatrace/openfeature-provider-go/issues/18)) ([346b0c9](https://github.com/Dynatrace/openfeature-provider-go/commit/346b0c95dd22829915ea37fd3df6db137ba9c2a4))
+
+
+### 📚 Documentation
+
+* align README with the standard provider format ([#19](https://github.com/Dynatrace/openfeature-provider-go/issues/19)) ([3bdec25](https://github.com/Dynatrace/openfeature-provider-go/commit/3bdec2577cc5bbf919acd7081e60b0313a7138e8))
+
 ## [0.1.1-alpha](https://github.com/Dynatrace/openfeature-provider-go/compare/v0.1.0-alpha...v0.1.1-alpha) (2026-08-28)
 
 
