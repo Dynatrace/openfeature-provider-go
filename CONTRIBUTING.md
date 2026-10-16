@@ -23,6 +23,8 @@ golangci-lint run
 This project uses [Conventional Commits](https://www.conventionalcommits.org/).
 PR titles must follow the format: `type: description` (e.g., `feat: add SSE support`).
 
+Name branches `<type>/<slug>` (e.g., `feat/sse-client`).
+
 ## Architecture
 
 The provider wraps `flagd-core` (`github.com/open-feature/flagd/core`) for in-process evaluation
