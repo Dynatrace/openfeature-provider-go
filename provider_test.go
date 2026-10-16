@@ -105,6 +105,25 @@ func TestProvider_BooleanEvaluation_AfterInit(t *testing.T) {
 	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
 }
 
+// the CDN config carries an eventStreams block next to the flag definitions; flagd-core must still accept it
+func TestProvider_Init_AcceptsEventStreamsInConfig(t *testing.T) {
+	const body = `{
+  "metadata": {"version": "1"},
+  "flags": {
+    "my-bool": {"state": "ENABLED", "variants": {"on": true, "off": false}, "defaultVariant": "on"}
+  },
+  "eventStreams": [{"type": "sse", "endpoint": {"requestUri": "/sse"}}]
+}`
+	srv := newTestServer(body, 200)
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	require.NoError(t, p.Init(openfeature.NewEvaluationContext("", nil)))
+	defer p.Shutdown()
+
+	assert.True(t, p.BooleanEvaluation(context.Background(), "my-bool", false, nil).Value)
+}
+
 func TestProvider_BooleanEvaluation_DisabledFlag(t *testing.T) {
 	const disabledJSON = `{
   "flags": {
