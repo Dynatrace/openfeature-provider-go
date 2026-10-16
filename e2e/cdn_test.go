@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -62,6 +63,14 @@ const (
 	holdCheckStep = 50 * time.Millisecond
 	// never matches an expected count, so a failed control call fails the assertion
 	requestCountUnavailable = -1
+	// the one stream path the mock serves
+	sseStreamPath = "/sse"
+	// placeholder in a scenario's stream url for the mock server's host and port
+	mockserverPlaceholder = "<mockserver>"
+	// covers the provider opening the stream after initialization has returned
+	sseConnectTimeout = 5 * time.Second
+	// covers the previous scenario's provider closing its stream
+	sseDrainTimeout = 5 * time.Second
 )
 
 var (
@@ -86,8 +95,9 @@ func TestCDNE2E(t *testing.T) {
 			Paths:    []string{filepath.Join(harnessDir, "gherkin")},
 			Strict:   true,
 			TestingT: t,
-			// single-flight needs an SSE-triggered re-fetch; SSE is not implemented yet
-			Tags: "~@single-flight && ~@sse",
+			// SSE groups are enabled as the provider gains the behaviour they exercise; single-flight needs
+			// an SSE-triggered re-fetch
+			Tags: "~@single-flight && ~@sse,@discovery",
 		},
 	}
 	if suite.Run() != 0 {
@@ -120,6 +130,10 @@ func initializeScenario(sc *godog.ScenarioContext) {
 		s.domain = fmt.Sprintf("e2e-test-%d", scenarioSeq.Add(1))
 		s.client = openfeature.NewClient(s.domain)
 		if mock != nil {
+			// the previous scenario's provider is shut down, but the mock notices its closed stream a moment later
+			if err := waitFor(sseDrainTimeout, func() bool { return sseClients() == 0 }); err != nil {
+				return ctx, errors.New("SSE clients from the previous scenario are still connected")
+			}
 			return ctx, mock.reset()
 		}
 		return ctx, nil
@@ -131,8 +145,11 @@ func initializeScenario(sc *godog.ScenarioContext) {
 
 	// GIVEN
 	sc.Step(`^a mock server is running$`, s.aMockServerIsRunning)
+	sc.Step(`^a mock server with SSE enabled is running$`, s.aMockServerWithSSEEnabledIsRunning)
 	sc.Step(`^the SDK key "([^"]*)"$`, s.theSDKKey)
 	sc.Step(`^the CDN serves the "([^"]*)" flag configuration$`, s.theCDNServesTheFlagConfiguration)
+	sc.Step(`^the CDN serves the "([^"]*)" flag configuration advertising an SSE stream at url "([^"]*)"$`, s.theCDNServesTheFlagConfigurationAdvertisingAnSSEStreamAtURL)
+	sc.Step(`^SSE is disabled by configuration$`, s.sseIsDisabledByConfiguration)
 	sc.Step(`^an initialized, READY provider serving the "([^"]*)" flag configuration(?: with "([^"]*)" header "([^"]*)")?$`, s.anInitializedReadyProviderServingTheFlagConfiguration)
 	sc.Step(`^the CDN responds slower than the request timeout$`, s.theCDNRespondsSlowerThanTheRequestTimeout)
 	sc.Step(`^the CDN responds slowly but within the request timeout$`, s.theCDNRespondsSlowlyButWithinTheRequestTimeout)
@@ -157,6 +174,8 @@ func initializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the initial CDN request has no "([^"]*)" header$`, s.theInitialCDNRequestHasNoHeader)
 	sc.Step(`^the (\d+)\. CDN request has the "([^"]*)" header "([^"]*)"$`, s.theCDNRequestHasTheHeader)
 	sc.Step(`^the CDN has received (\d+) further requests?$`, s.theCDNHasReceivedFurtherRequests)
+	sc.Step(`^the provider has an SSE connection to "([^"]*)"$`, s.theProviderHasAnSSEConnectionTo)
+	sc.Step(`^the provider opens no SSE connection$`, s.theProviderOpensNoSSEConnection)
 	sc.Step(`^consecutive poll ticks are one poll interval apart$`, s.consecutivePollTicksAreOnePollIntervalApart)
 	sc.Step(`^the first poll tick is one poll interval after initialization completed$`, s.theFirstPollTickIsOnePollIntervalAfterInitializationCompleted)
 	sc.Step(`^flag "([^"]*)" evaluates to (\w+)$`, s.flagEvaluatesTo)
@@ -186,6 +205,11 @@ func (s *scenario) aMockServerIsRunning() error {
 	return nil
 }
 
+// the mock always serves its SSE endpoints, so this is the plain mock server
+func (s *scenario) aMockServerWithSSEEnabledIsRunning() error {
+	return s.aMockServerIsRunning()
+}
+
 func (s *scenario) theSDKKey(key string) error {
 	s.sdkKey = key
 	return nil
@@ -197,6 +221,32 @@ func (s *scenario) theCDNServesTheFlagConfiguration(name string) error {
 		return err
 	}
 	return s.setCDNResponses(buildCDNResponse(http.StatusOK, body))
+}
+
+// serves the fixture with a flat SSE url added to its config; "<mockserver>" in the url stands for the mock's host and port
+func (s *scenario) theCDNServesTheFlagConfigurationAdvertisingAnSSEStreamAtURL(name, streamURL string) error {
+	body, err := loadFlagConfig(name)
+	if err != nil {
+		return err
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(body), &config); err != nil {
+		return fmt.Errorf("parse flag config fixture %s: %w", name, err)
+	}
+	mockHost := strings.TrimPrefix(mock.origin, "http://")
+	config["eventStreams"] = []map[string]string{
+		{"type": "sse", "url": strings.ReplaceAll(streamURL, mockserverPlaceholder, mockHost)},
+	}
+	advertised, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	return s.setCDNResponses(buildCDNResponse(http.StatusOK, string(advertised)))
+}
+
+func (s *scenario) sseIsDisabledByConfiguration() error {
+	s.options = append(s.options, dynatrace.WithSSEDisabled())
+	return nil
 }
 
 // header is empty when the step has no "with ... header ..." suffix
@@ -380,6 +430,25 @@ func (s *scenario) theCDNHasReceivedFurtherRequests(count int) error {
 	return s.resetCountBaseline()
 }
 
+// the mock only reports a client count, and only serves one stream path, so the path can be checked but not read back
+func (s *scenario) theProviderHasAnSSEConnectionTo(path string) error {
+	if path != sseStreamPath {
+		return fmt.Errorf("the mock only serves %s, so a connection to %s cannot exist", sseStreamPath, path)
+	}
+	if err := waitFor(sseConnectTimeout, func() bool { return sseClients() >= 1 }); err != nil {
+		return fmt.Errorf("provider did not connect to %s: saw %d SSE client(s)", path, sseClients())
+	}
+	return nil
+}
+
+// the absence must hold, not merely be true once: a stream that is retrying would connect a moment later
+func (s *scenario) theProviderOpensNoSSEConnection() error {
+	if err := assertHoldsFor(countSettle, func() bool { return sseClients() == 0 }); err != nil {
+		return fmt.Errorf("expected no SSE connection, saw %d client(s)", sseClients())
+	}
+	return nil
+}
+
 // the cadence is anchored to when each fetch was issued, not when it finished
 func (s *scenario) consecutivePollTicksAreOnePollIntervalApart() error {
 	reqs, err := mock.fetchCDNRequests()
@@ -518,6 +587,15 @@ func (s *scenario) computeNextTickAtMs() int64 {
 	period := pollInterval.Milliseconds()
 	elapsed := nowMs() - s.pollingStartedAtMs
 	return s.pollingStartedAtMs + (elapsed/period+1)*period
+}
+
+// sseClients returns the number of SSE clients connected to the mock, or requestCountUnavailable if it cannot be read.
+func sseClients() int {
+	n, err := mock.sseClientCount()
+	if err != nil {
+		return requestCountUnavailable
+	}
+	return n
 }
 
 // getNthCDNRequest returns the 0-indexed recorded CDN request, failing if fewer were received.
