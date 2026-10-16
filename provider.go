@@ -59,6 +59,7 @@ type DynatraceProvider struct {
 	state             atomic.Pointer[openfeature.State]
 	successChan       chan internal.FetchResult
 	failureChan       chan string
+	poller            *internal.Poller
 	pollCancel        context.CancelFunc
 	pollDoneChan      <-chan struct{}
 	sseDisabled       bool
@@ -303,8 +304,9 @@ func (p *DynatraceProvider) startBackgroundLoops() {
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	p.pollCancel = pollCancel
-	// TryFetch, not Fetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
-	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.TryFetch, p.successChan, p.failureChan, p.pollInterval)
+	// ticks use TryFetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
+	p.poller = internal.NewPoller(p.fetcher.TryFetch, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	p.pollDoneChan = p.poller.Start(pollCtx)
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
