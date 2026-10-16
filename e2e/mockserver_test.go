@@ -121,6 +121,21 @@ func (m *mockServer) countCDNRequests() (int, error) {
 	return len(reqs), err
 }
 
+// sseClientCount returns how many SSE subscribers are connected to the mock right now.
+func (m *mockServer) sseClientCount() (int, error) {
+	raw, err := m.sendControlRequest(http.MethodGet, "/__control__/sse/clients", nil)
+	if err != nil {
+		return 0, err
+	}
+	var parsed struct {
+		Clients int `json:"clients"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return 0, fmt.Errorf("parse sse client count %q: %w", raw, err)
+	}
+	return parsed.Clients, nil
+}
+
 // sendControlRequest calls the mock's control API, JSON-encoding body when non-nil, and returns the response body.
 func (m *mockServer) sendControlRequest(method, path string, body any) ([]byte, error) {
 	var reader io.Reader

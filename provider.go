@@ -61,6 +61,13 @@ type DynatraceProvider struct {
 	failureChan       chan string
 	pollCancel        context.CancelFunc
 	pollDoneChan      <-chan struct{}
+	sseDisabled       bool
+	sseMu             sync.Mutex
+	sseStarted        bool
+	sseStopped        bool
+	sseUnusableLogged bool
+	sseCancel         context.CancelFunc
+	sseDoneChan       <-chan struct{}
 	stateLoopDoneChan chan struct{}
 	shutdownOnce      sync.Once
 
@@ -91,6 +98,12 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 // withPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
 func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.pollInterval = d }
+}
+
+// WithSSEDisabled stops the provider from opening the SSE stream. Without it, the provider opens the stream
+// the config advertises, if any.
+func WithSSEDisabled() ProviderOption {
+	return func(p *DynatraceProvider) { p.sseDisabled = true }
 }
 
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
@@ -185,7 +198,7 @@ func (p *DynatraceProvider) Hooks() []openfeature.Hook {
 func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	slog.Info("initializing dynatrace provider", "key", p.config.publicKey())
 
-	initErr := p.loadInitialConfig()
+	body, initErr := p.loadInitialConfig()
 	if initErr != nil {
 		// nothing to undo: ETag/Last-Modified are stored only after a body applies, and this one did not
 		slog.Error("initial cdn fetch failed; starting in ERROR and recovering on the polling timer",
@@ -200,34 +213,86 @@ func (p *DynatraceProvider) Init(_ openfeature.EvaluationContext) error {
 	if initErr != nil {
 		return initErr
 	}
+	p.ensureSSEStarted(body)
 	slog.Info("dynatrace provider initialized", "key", p.config.publicKey())
 	return nil
 }
 
-// loadInitialConfig performs the initial fetch and applies the config it returns.
-func (p *DynatraceProvider) loadInitialConfig() error {
+// loadInitialConfig fetches and applies the initial config, and returns the applied body.
+func (p *DynatraceProvider) loadInitialConfig() (string, error) {
 	result, fetchErr := p.fetcher.Fetch(context.Background())
 	if fetchErr != nil {
-		return fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
+		return "", fmt.Errorf("initial cdn fetch failed: %w", fetchErr)
 	}
 	if result.IsSkipped() {
-		return fmt.Errorf("initial cdn fetch was skipped")
+		return "", fmt.Errorf("initial cdn fetch was skipped")
 	}
 	if !result.IsSuccess() {
-		return fmt.Errorf("initial cdn fetch returned HTTP %d", result.Status)
+		return "", fmt.Errorf("initial cdn fetch returned HTTP %d", result.Status)
 	}
 	if result.Body == "" {
-		return fmt.Errorf("initial cdn response body was empty")
+		return "", fmt.Errorf("initial cdn response body was empty")
 	}
 	if setErr := p.evaluator.SetState(flagdsync.DataSync{
 		FlagData: result.Body,
 		Source:   p.config.cdnURL,
 	}); setErr != nil {
-		return fmt.Errorf("initial cdn config is invalid: %w", setErr)
+		return "", fmt.Errorf("initial cdn config is invalid: %w", setErr)
 	}
 	// applied: remember this response's ETag/Last-Modified so the first poll is conditional
 	p.fetcher.Commit(result.ETag, result.LastModified)
-	return nil
+	return result.Body, nil
+}
+
+// ensureSSEStarted opens the SSE stream the config advertises, at most once. It is called after every applied
+// config, so a provider whose initial fetch failed still opens the stream after its first successful poll.
+// It does nothing if SSE is disabled, no usable stream is advertised, or the provider has shut down.
+func (p *DynatraceProvider) ensureSSEStarted(body string) {
+	if p.sseDisabled {
+		return
+	}
+	p.sseMu.Lock()
+	defer p.sseMu.Unlock()
+	if p.sseStarted || p.sseStopped {
+		return
+	}
+	sseURL, advertised := internal.ParseSSEURL(body, internal.OriginOf(p.config.cdnURL))
+	if sseURL == "" {
+		// the URL is not logged because it can carry credentials
+		if advertised && !p.sseUnusableLogged {
+			p.sseUnusableLogged = true
+			slog.Warn("advertised sse stream is unusable; using polling only")
+		}
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.sseCancel = cancel
+	p.sseDoneChan = internal.RunSSE(ctx, sseURL, internal.SSEOptions{Client: p.sseHTTPClient()}, nil)
+	p.sseStarted = true
+	slog.Info("opening sse stream", "url", internal.MaskURL(sseURL))
+}
+
+// sseHTTPClient returns the injected HTTP client without its timeout, which would cut the long-lived stream.
+// Nil means RunSSE uses its default client.
+func (p *DynatraceProvider) sseHTTPClient() *http.Client {
+	if p.httpClient == nil {
+		return nil
+	}
+	client := *p.httpClient
+	client.Timeout = 0
+	return &client
+}
+
+// stopSSE closes the stream, waits for it to finish, and prevents any later start.
+func (p *DynatraceProvider) stopSSE() {
+	p.sseMu.Lock()
+	p.sseStopped = true
+	cancel, done := p.sseCancel, p.sseDoneChan
+	p.sseMu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
 }
 
 // startBackgroundLoops starts the state loop, the polling timer and the metrics flusher. The
@@ -251,6 +316,8 @@ func (p *DynatraceProvider) startBackgroundLoops() {
 func (p *DynatraceProvider) Shutdown() {
 	p.shutdownOnce.Do(func() {
 		slog.Info("shutting down dynatrace provider")
+		// the stream is closed first (providers.md 6.1)
+		p.stopSSE()
 		if p.pollCancel != nil {
 			p.pollCancel()
 			<-p.pollDoneChan
@@ -478,6 +545,8 @@ func (p *DynatraceProvider) stateLoop() {
 					continue
 				}
 				changed = keys
+				// starts the stream after a failed init, when there was no config to read it from
+				p.ensureSSEStarted(result.Body)
 			}
 			stopGrace()
 			// NotReady covers a failed init: the first successful poll brings the provider up, so it must emit PROVIDER_READY
