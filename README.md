@@ -79,10 +79,10 @@ A runnable example lives in [`examples`](examples).
 
 ### Change notifications
 
-If the flag configuration advertises an SSE stream, the provider opens it in the background. The stream is
-optional: if it is not advertised, is turned off with `WithSSEDisabled()`, or cannot be reached, the provider keeps
-getting its flags from the CDN as before. An unreachable stream is retried in the background, because it is
-usually only down temporarily.
+The flag configuration can advertise an SSE stream. When it does, the provider opens it in the background and
+fetches the configuration once it is connected, then polls every 10 minutes as a safety net. While no stream is
+connected, because none is advertised, SSE is disabled, or it cannot be reached, the provider polls every 10
+seconds. A stream that cannot be opened never fails the provider; it keeps being retried.
 
 ## Contributing
 
