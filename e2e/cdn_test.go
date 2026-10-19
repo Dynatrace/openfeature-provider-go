@@ -87,7 +87,7 @@ func TestCDNE2E(t *testing.T) {
 			Strict:   true,
 			TestingT: t,
 			// single-flight needs an SSE-triggered re-fetch; SSE is not implemented yet
-			Tags: "~@single-flight",
+			Tags: "~@single-flight && ~@sse",
 		},
 	}
 	if suite.Run() != 0 {
@@ -148,6 +148,7 @@ func initializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^(\d+) poll intervals? elapses?$`, s.pollIntervalsElapse)
 	sc.Step(`^the next poll tick arrives$`, s.theNextPollTickArrives)
 	sc.Step(`^the Retry-After window expires$`, s.theRetryAfterWindowExpires)
+	sc.Step(`^an SSE re-fetch is triggered shortly before the next poll tick$`, s.anSSERefetchIsTriggeredShortlyBeforeTheNextPollTick)
 
 	// THEN
 	sc.Step(`^initialization succeeds$`, s.initializationSucceeds)
@@ -308,6 +309,12 @@ func (s *scenario) theRetryAfterWindowExpires() error {
 	}
 	time.Sleep(s.retryAfter + tickMargin)
 	return nil
+}
+
+// Pending: emit a refetchConfig event via POST /__control__/sse/emit shortly before the next poll tick,
+// once the provider has an SSE client
+func (s *scenario) anSSERefetchIsTriggeredShortlyBeforeTheNextPollTick() error {
+	return godog.ErrPending
 }
 
 // THEN
