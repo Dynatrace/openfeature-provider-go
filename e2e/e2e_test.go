@@ -97,7 +97,7 @@ func TestE2E(t *testing.T) {
 			TestingT: t,
 			// SSE groups are enabled as the provider gains the behaviour they exercise; single-flight needs
 			// an SSE-triggered re-fetch
-			Tags: "~@single-flight && ~@sse,@discovery",
+			Tags: "~@single-flight && ~@sse,@discovery,@connect",
 		},
 	}
 	if suite.Run() != 0 {
@@ -121,6 +121,14 @@ type scenario struct {
 	cdnResponses []cdnResponse
 	// Retry-After the CDN was set up with, so a scenario can wait that window out
 	retryAfter time.Duration
+	// poll interval while the SSE stream is connected, from the harness timings
+	connectedPollInterval time.Duration
+}
+
+// timings are the harness's adjusted timings: every scenario runs with these, and all other timings stay at
+// production defaults.
+type timings struct {
+	SSEConnectedPollIntervalMs int64 `json:"SSE_CONNECTED_POLL_INTERVAL_MS"`
 }
 
 func initializeScenario(sc *godog.ScenarioContext) {
@@ -174,8 +182,10 @@ func initializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the initial CDN request has no "([^"]*)" header$`, s.theInitialCDNRequestHasNoHeader)
 	sc.Step(`^the (\d+)\. CDN request has the "([^"]*)" header "([^"]*)"$`, s.theCDNRequestHasTheHeader)
 	sc.Step(`^the CDN has received (\d+) further requests?$`, s.theCDNHasReceivedFurtherRequests)
+	sc.Step(`^the CDN received (\d+) requests?$`, s.theCDNReceivedRequests)
 	sc.Step(`^the provider has an SSE connection to "([^"]*)"$`, s.theProviderHasAnSSEConnectionTo)
 	sc.Step(`^the provider opens no SSE connection$`, s.theProviderOpensNoSSEConnection)
+	sc.Step(`^the active poll interval is the SSE_CONNECTED_POLL_INTERVAL$`, s.theActivePollIntervalIsTheSSEConnectedPollInterval)
 	sc.Step(`^consecutive poll ticks are one poll interval apart$`, s.consecutivePollTicksAreOnePollIntervalApart)
 	sc.Step(`^the first poll tick is one poll interval after initialization completed$`, s.theFirstPollTickIsOnePollIntervalAfterInitializationCompleted)
 	sc.Step(`^flag "([^"]*)" evaluates to (\w+)$`, s.flagEvaluatesTo)
@@ -205,9 +215,18 @@ func (s *scenario) aMockServerIsRunning() error {
 	return nil
 }
 
-// the mock always serves its SSE endpoints, so this is the plain mock server
+// the mock always serves its SSE endpoints, so SSE-enabled means the plain mock server plus the harness timings
 func (s *scenario) aMockServerWithSSEEnabledIsRunning() error {
-	return s.aMockServerIsRunning()
+	if err := s.aMockServerIsRunning(); err != nil {
+		return err
+	}
+	t, err := loadTimings()
+	if err != nil {
+		return err
+	}
+	s.connectedPollInterval = time.Duration(t.SSEConnectedPollIntervalMs) * time.Millisecond
+	s.options = append(s.options, dynatrace.WithSSEConnectedPollInterval(s.connectedPollInterval))
+	return nil
 }
 
 func (s *scenario) theSDKKey(key string) error {
@@ -430,6 +449,20 @@ func (s *scenario) theCDNHasReceivedFurtherRequests(count int) error {
 	return s.resetCountBaseline()
 }
 
+// absolute count since the mock was reset, unlike the "further requests" step; it must settle like that
+// step does, so a stray extra request still fails
+func (s *scenario) theCDNReceivedRequests(count int) error {
+	if count > 0 {
+		if err := waitFor(countTimeout, func() bool { return totalRequests() >= count }); err != nil {
+			return fmt.Errorf("expected %d CDN request(s), saw %d", count, totalRequests())
+		}
+	}
+	if err := assertHoldsFor(countSettle, func() bool { return totalRequests() == count }); err != nil {
+		return fmt.Errorf("expected %d CDN request(s), saw %d", count, totalRequests())
+	}
+	return nil
+}
+
 // the mock only reports a client count, and only serves one stream path, so the path can be checked but not read back
 func (s *scenario) theProviderHasAnSSEConnectionTo(path string) error {
 	if path != sseStreamPath {
@@ -447,6 +480,23 @@ func (s *scenario) theProviderOpensNoSSEConnection() error {
 		return fmt.Errorf("expected no SSE connection, saw %d client(s)", sseClients())
 	}
 	return nil
+}
+
+// the connect fetch is the 2nd request and the next request is a poll tick; the gap between them is the active
+// interval, which would be the default one had polling not relaxed on connect
+func (s *scenario) theActivePollIntervalIsTheSSEConnectedPollInterval() error {
+	const connectFetch, nextTick = 1, 2
+	var reqs []recordedRequest
+	enough := func() bool {
+		r, err := mock.fetchCDNRequests()
+		reqs = r
+		return err == nil && len(r) > nextTick
+	}
+	if err := waitFor(s.connectedPollInterval+countTimeout, enough); err != nil {
+		return fmt.Errorf("expected a poll tick after the connect fetch, saw %d request(s)", len(reqs))
+	}
+	return assertCadenceNear(reqs[nextTick].ReceivedAtMs-reqs[connectFetch].ReceivedAtMs, s.connectedPollInterval,
+		"gap between the connect fetch and the next poll tick")
 }
 
 // the cadence is anchored to when each fetch was issued, not when it finished
@@ -617,11 +667,40 @@ func (s *scenario) isFlagValue(flag string, expected bool) bool {
 
 // assertCadence fails unless measuredMs is within cadenceTolerance of one poll interval.
 func assertCadence(measuredMs int64, what string) error {
-	expected := pollInterval.Milliseconds()
-	if diff := measuredMs - expected; diff > cadenceTolerance.Milliseconds() || -diff > cadenceTolerance.Milliseconds() {
-		return fmt.Errorf("%s was %dms, expected %dms +/- %dms", what, measuredMs, expected, cadenceTolerance.Milliseconds())
+	return assertCadenceNear(measuredMs, pollInterval, what)
+}
+
+// assertCadenceNear fails unless measuredMs is within cadenceTolerance of expected.
+func assertCadenceNear(measuredMs int64, expected time.Duration, what string) error {
+	if diff := measuredMs - expected.Milliseconds(); diff > cadenceTolerance.Milliseconds() || -diff > cadenceTolerance.Milliseconds() {
+		return fmt.Errorf("%s was %dms, expected %dms +/- %dms", what, measuredMs, expected.Milliseconds(), cadenceTolerance.Milliseconds())
 	}
 	return nil
+}
+
+// totalRequests returns the CDN requests received since the mock was reset, or requestCountUnavailable if it cannot be read.
+func totalRequests() int {
+	n, err := mock.countCDNRequests()
+	if err != nil {
+		return requestCountUnavailable
+	}
+	return n
+}
+
+// loadTimings returns the harness's adjusted timings.
+func loadTimings() (timings, error) {
+	raw, err := os.ReadFile(filepath.Join(harnessDir, "gherkin", "timings.json"))
+	if err != nil {
+		return timings{}, fmt.Errorf("read harness timings: %w", err)
+	}
+	var t timings
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return timings{}, fmt.Errorf("parse harness timings: %w", err)
+	}
+	if t.SSEConnectedPollIntervalMs <= 0 {
+		return timings{}, errors.New("harness timings carry no SSE_CONNECTED_POLL_INTERVAL_MS")
+	}
+	return t, nil
 }
 
 // loadFlagConfig returns a flag configuration fixture from the harness by name, e.g. "flags-v1".

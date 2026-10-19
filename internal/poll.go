@@ -10,9 +10,13 @@ import (
 )
 
 const (
-	// DefaultPollInterval is the provider's poll cadence unless overridden.
+	// DefaultPollInterval is the provider's poll cadence unless overridden. It applies while no SSE stream is
+	// connected, so a missed change notification is caught quickly.
 	DefaultPollInterval = 10 * time.Second
-	minPollInterval     = time.Millisecond
+	// DefaultSSEConnectedPollInterval is the poll cadence while the SSE stream is connected: notifications
+	// carry the changes, so polling is only a safety net (providers.md 2.1).
+	DefaultSSEConnectedPollInterval = 10 * time.Minute
+	minPollInterval                 = time.Millisecond
 )
 
 // Poll launches a goroutine that drives periodic flag-config polling. It runs until ctx is
