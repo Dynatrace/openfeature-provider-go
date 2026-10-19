@@ -73,8 +73,16 @@ provider, err := dynatrace.NewProvider(
 | --- | --- | --- | --- |
 | `WithConfigOrigin(origin)` | `string` | derived from SDK key | Override the flag configuration origin. |
 | `WithMetricsOrigin(origin)` | `string` | derived from SDK key | Override the evaluation metrics ingest origin. |
+| `WithSSEDisabled()` | none | SSE enabled | Never open the SSE change-notification stream; the provider only polls. |
 
 A runnable example lives in [`examples`](examples).
+
+### Change notifications
+
+If the flag configuration advertises an SSE stream, the provider opens it in the background. The stream is
+optional: if it is not advertised, is turned off with `WithSSEDisabled()`, or cannot be reached, the provider keeps
+getting its flags from the CDN as before. An unreachable stream is retried in the background, because it is
+usually only down temporarily.
 
 ## Contributing
 
