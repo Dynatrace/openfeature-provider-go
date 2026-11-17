@@ -14,8 +14,6 @@ The Go provider opens the SSE stream the CDN config advertises. A message is a d
 | PR 2: message handling | not started | see below; build it on this branch |
 | PR 3: lifecycle (disconnect, reconnect, grace) | not started | see below |
 
-![SSE PR stack: overview and one diagram per PR](sse-pr-stack.png)
-
 The same diagrams as copy-paste Mermaid are in [`sse-pr-diagrams.md`](sse-pr-diagrams.md). The overview:
 
 ```mermaid
