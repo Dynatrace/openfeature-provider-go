@@ -7,12 +7,13 @@ Placeholder notes, see [`sse-handover.md`](sse-handover.md). Mermaid, so it rend
 ```mermaid
 flowchart LR
   main["main"] --> A["PR A (#28)<br/>open the stream"]
-  A --> B["PR B<br/>catch up, relax polling"]
-  B -.-> P2["PR 2 (planned)<br/>message handling"]
+  A --> B["PR B (#36)<br/>relax polling on connect"]
+  B --> H["#38 (placeholder)<br/>handover notes"]
+  H -.-> P2["PR 2 (planned)<br/>message handling"]
   P2 -.-> P3["PR 3 (planned)<br/>lifecycle"]
 ```
 
-## PR A: open the advertised stream
+## PR A (#28): open the advertised stream
 
 ```mermaid
 sequenceDiagram
@@ -21,13 +22,15 @@ sequenceDiagram
   participant S as SSE stream
   P->>C: GET config
   C-->>P: flags + eventStreams
-  Note over P: no entry or WithSSEDisabled means polling only
+  Note over P: no eventStream from the CDN or WithSSEDisabled: stream not opened, poll the CDN only
   P->>S: open stream (150 s read timeout)
   S--xP: refused or down
-  Note over P: keep retrying with jitter, stay READY, keep polling
+  Note over P: keep retrying to connect (jitter), stay READY, keep polling the CDN
 ```
 
-## PR B: catch up and relax polling on connect
+The read timeout is more than twice the 60 s keep-alive. There is no connect timeout.
+
+## PR B (#36): relax polling when the stream connects
 
 ```mermaid
 sequenceDiagram
