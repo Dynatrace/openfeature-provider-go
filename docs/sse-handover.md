@@ -10,7 +10,8 @@ The Go provider opens the SSE stream the CDN config advertises. A message is a d
 |---|---|---|
 | A: parse the stream from the CDN config, stream manager, start after first config, `WithSSEDisabled`, docs | `feat/sse-open-stream`, PR #28 | pushed, draft, CI green, no review yet |
 | B: `Poller` (interval change, trigger), catch-up fetch and connected cadence on connect, docs | `feat/sse-connect-polling`, PR #36 | stacked on A (base `feat/sse-open-stream`), draft, CI green, no review yet |
-| PR 2: message handling | not started | see below |
+| Handover notes (this PR) | `docs/sse-handover`, PR #38 | placeholder, draft, stacked on B (base `feat/sse-connect-polling`) |
+| PR 2: message handling | not started | see below; build it on this branch |
 | PR 3: lifecycle (disconnect, reconnect, grace) | not started | see below |
 
 ![SSE PR stack: overview and one diagram per PR](sse-pr-stack.png)
@@ -20,15 +21,17 @@ The same diagrams as copy-paste Mermaid are in [`sse-pr-diagrams.md`](sse-pr-dia
 ```mermaid
 flowchart LR
   main["main"] --> A["PR A (#28)<br/>open the stream"]
-  A --> B["PR B<br/>catch up, relax polling"]
-  B -.-> P2["PR 2 (planned)<br/>message handling"]
+  A --> B["PR B (#36)<br/>relax polling on connect"]
+  B --> H["#38 (placeholder)<br/>handover notes"]
+  H -.-> P2["PR 2 (planned)<br/>message handling"]
   P2 -.-> P3["PR 3 (planned)<br/>lifecycle"]
 ```
 
 e2e tags enabled today: A `@discovery`, B `@discovery,@connect`. Other `@sse` groups stay excluded in `e2e/cdn_test.go` until the PR that implements them.
 
 ## Decisions already made
-- SSE read timeout 150 s. No connect or write timeout.
+- SSE read timeout 150 s, because that is more than twice the 60 s keep-alive. No connect or write timeout.
+- The stack is merged together after review (stated on #36), not one PR at a time.
 - Never log credentials or a raw stream URL: always `MaskURL`. Also scrub error strings (`net/http` puts the URL in `url.Error`) and the library logger.
 - The stream URL comes from the CDN config (flat `url` wins, else `endpoint.requestUri` + `endpoint.origin`, falling back to the CDN origin). We do not derive the channel name.
 - A stream that never connects keeps retrying (with jitter). It is not a disconnect: no cadence or state change.
@@ -52,7 +55,7 @@ e2e tags enabled today: A `@discovery`, B `@discovery,@connect`. Other `@sse` gr
 - Does the production CDN ETag cover `eventStreams`? Until verified, `ParseSSEURL` runs on every config instead of skipping when the ETag is unchanged.
 - Stdlib SSE client or keep the library?
 - Java provider leaks stream credentials in two places (start-failure warning via `URI.create`, and the library debug log). To raise with the Java owners.
-- Merge strategy: if the repo squashes, per-commit types never reach the changelog.
+- Merge strategy: the stack merges together, but squash versus merge commit is still unchecked. If the repo squashes, per-commit types never reach the changelog.
 
 ## How to work here
 - Commits: one short line, Conventional Commits (`feat:`, `fix:`, `chore:`), no body. `lint-pr.yml` enforces PR titles. CHANGELOG is release-please managed: do not edit.
