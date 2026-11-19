@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type DynatraceProvider struct {
 	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
+	lookupEnv    func(string) (string, bool)
 
 	state             atomic.Pointer[openfeature.State]
 	successChan       chan internal.FetchResult
@@ -79,6 +81,8 @@ type ProviderOption func(*DynatraceProvider)
 // WithConfigOrigin overrides the config origin (scheme, host, and port). For dev/labs environments.
 // The platform and key path segments are appended automatically.
 // Production URL is derived automatically from the SDK key.
+// If set, carefully consider whether WithMetricsOrigin should be set too; an SDK proxy or
+// custom host typically serves both.
 func WithConfigOrigin(origin string) ProviderOption {
 	return func(p *DynatraceProvider) { p.configOrigin = origin }
 }
@@ -91,6 +95,11 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 // withPollInterval overrides the polling interval. Not user-configurable per spec; exposed for testing.
 func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.pollInterval = d }
+}
+
+// withLookupEnv overrides the env lookup. Exposed for testing.
+func withLookupEnv(fn func(string) (string, bool)) ProviderOption {
+	return func(p *DynatraceProvider) { p.lookupEnv = fn }
 }
 
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
@@ -111,7 +120,9 @@ func WithMetricsFlushInterval(d time.Duration) ProviderOption {
 }
 
 // NewProvider creates a DynatraceProvider for the given SDK key.
-// The key is validated immediately; an error is returned if the format is invalid.
+// An empty sdkKey falls back to the DT_FM_SDK_KEY env var. Options left unset fall back to their
+// env vars (DT_FM_CONFIG_ORIGIN, DT_FM_METRICS_ORIGIN), read once here.
+// The key is validated immediately; an error is returned if it is missing or its format is invalid.
 func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, error) {
 	zapLog := zap.NewNop()
 	log := logger.NewLogger(zapLog, false)
@@ -126,13 +137,14 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 		gracePeriod:  defaultGracePeriod,
 		successChan:  make(chan internal.FetchResult, channelBufferSize),
 		failureChan:  make(chan string, channelBufferSize),
+		lookupEnv:    os.LookupEnv,
 	}
 	p.setState(openfeature.NotReadyState)
 	for _, opt := range opts {
 		opt(p)
 	}
 
-	cfg, err := parseSDKKey(sdkKey, p.configOrigin, p.metricsOrigin)
+	cfg, err := resolveConfig(sdkKey, p.configOrigin, p.metricsOrigin, p.lookupEnv)
 	if err != nil {
 		return nil, err
 	}

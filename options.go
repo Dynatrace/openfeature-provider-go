@@ -10,6 +10,12 @@ import (
 
 const metricsPath = "/v1/metrics"
 
+const (
+	envSDKKey        = "DT_FM_SDK_KEY"
+	envConfigOrigin  = "DT_FM_CONFIG_ORIGIN"
+	envMetricsOrigin = "DT_FM_METRICS_ORIGIN"
+)
+
 var keyPattern = regexp.MustCompile(
 	`^(dt[0-9]{2})\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$`,
 )
@@ -44,10 +50,7 @@ func parseSDKKey(key string, configOrigin string, metricsOrigin string) (provide
 	}
 	m := keyPattern.FindStringSubmatch(key)
 	if m == nil {
-		return providerConfig{}, fmt.Errorf(
-			"invalid sdk key format (public: %q); expected dt{NN}.server_{geo}_{rand}.{secret}_{sha}",
-			publicKeySegment(key),
-		)
+		return providerConfig{}, invalidKeyFormatError(key)
 	}
 	geo := m[3]
 	platform := m[2]
@@ -65,6 +68,58 @@ func parseSDKKey(key string, configOrigin string, metricsOrigin string) (provide
 	}
 
 	return providerConfig{sdkKey: key, cdnURL: cdnURL, metricsURL: metricsURL}, nil
+}
+
+// resolveConfig applies code > env > default precedence to each option, then validates
+// the result with parseSDKKey. Values from env are validated first so errors name the env var.
+func resolveConfig(sdkKey, configOrigin, metricsOrigin string, lookupEnv func(string) (string, bool)) (providerConfig, error) {
+	sdkKey, keyFromEnv := resolveOption(sdkKey, envSDKKey, lookupEnv)
+	if sdkKey == "" {
+		return providerConfig{}, fmt.Errorf("sdk key is required; pass sdkKey or set %s", envSDKKey)
+	}
+	if keyFromEnv && !keyPattern.MatchString(sdkKey) {
+		return providerConfig{}, fmt.Errorf("%s: %w", envSDKKey, invalidKeyFormatError(sdkKey))
+	}
+	configOrigin, err := resolveOriginOption(configOrigin, envConfigOrigin, "config origin", lookupEnv)
+	if err != nil {
+		return providerConfig{}, err
+	}
+	metricsOrigin, err = resolveOriginOption(metricsOrigin, envMetricsOrigin, "metrics origin", lookupEnv)
+	if err != nil {
+		return providerConfig{}, err
+	}
+	return parseSDKKey(sdkKey, configOrigin, metricsOrigin)
+}
+
+// resolveOption returns the trimmed code value if set, otherwise the trimmed env value.
+// The bool reports whether the value came from env.
+func resolveOption(code, envVar string, lookupEnv func(string) (string, bool)) (string, bool) {
+	if code = strings.TrimSpace(code); code != "" {
+		return code, false
+	}
+	if v, ok := lookupEnv(envVar); ok {
+		if v = strings.TrimSpace(v); v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+func resolveOriginOption(code, envVar, field string, lookupEnv func(string) (string, bool)) (string, error) {
+	origin, fromEnv := resolveOption(code, envVar, lookupEnv)
+	if fromEnv {
+		if _, err := normalizeOrigin(origin, field+" ("+envVar+")"); err != nil {
+			return "", err
+		}
+	}
+	return origin, nil
+}
+
+func invalidKeyFormatError(key string) error {
+	return fmt.Errorf(
+		"invalid sdk key format (public: %q); expected dt{NN}.server_{geo}_{rand}.{secret}_{sha}",
+		publicKeySegment(key),
+	)
 }
 
 func resolveMetricsURL(geo string, metricsOrigin string) (string, error) {
