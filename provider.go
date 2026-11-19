@@ -55,10 +55,13 @@ type DynatraceProvider struct {
 	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
+	// sseConnectedPollInterval is the poll cadence while the SSE stream is connected; pollInterval applies otherwise
+	sseConnectedPollInterval time.Duration
 
 	state             atomic.Pointer[openfeature.State]
 	successChan       chan internal.FetchResult
 	failureChan       chan string
+	poller            *internal.Poller
 	pollCancel        context.CancelFunc
 	pollDoneChan      <-chan struct{}
 	sseDisabled       bool
@@ -104,6 +107,13 @@ func WithSSEDisabled() ProviderOption {
 	return func(p *DynatraceProvider) { p.sseDisabled = true }
 }
 
+// WithSSEConnectedPollInterval overrides the poll cadence used while the SSE stream is connected (default 10
+// minutes). Not meant for production: the cadence is fixed by spec and the option exists so labs and test suites
+// can observe it without waiting minutes.
+func WithSSEConnectedPollInterval(d time.Duration) ProviderOption {
+	return func(p *DynatraceProvider) { p.sseConnectedPollInterval = d }
+}
+
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
 func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
@@ -130,13 +140,14 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	eval := evaluator.NewJSON(log, flagStore)
 
 	p := &DynatraceProvider{
-		evaluator:    eval,
-		flagStore:    flagStore,
-		eventsChan:   make(chan openfeature.Event, channelBufferSize),
-		pollInterval: internal.DefaultPollInterval,
-		gracePeriod:  defaultGracePeriod,
-		successChan:  make(chan internal.FetchResult, channelBufferSize),
-		failureChan:  make(chan string, channelBufferSize),
+		evaluator:                eval,
+		flagStore:                flagStore,
+		eventsChan:               make(chan openfeature.Event, channelBufferSize),
+		pollInterval:             internal.DefaultPollInterval,
+		gracePeriod:              defaultGracePeriod,
+		sseConnectedPollInterval: internal.DefaultSSEConnectedPollInterval,
+		successChan:              make(chan internal.FetchResult, channelBufferSize),
+		failureChan:              make(chan string, channelBufferSize),
 	}
 	p.setState(openfeature.NotReadyState)
 	for _, opt := range opts {
@@ -264,12 +275,20 @@ func (p *DynatraceProvider) ensureSSEStarted(body string) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := internal.RunSSE(ctx, sseURL, internal.SSEOptions{Client: p.sseHTTPClient()}, nil)
+	done := internal.RunSSE(ctx, sseURL, internal.SSEOptions{Client: p.sseHTTPClient()}, p.onSSEConnected)
 	p.sseStop = func() {
 		cancel()
 		<-done
 	}
 	slog.Info("opening sse stream", "url", internal.MaskURL(sseURL))
+}
+
+// onSSEConnected runs when the stream is established: a change may have been announced before it was, so it
+// fetches once now, and polling relaxes to the safety-net cadence now that notifications carry the changes.
+func (p *DynatraceProvider) onSSEConnected() {
+	slog.Info("sse connected; relaxing polling", "interval", p.sseConnectedPollInterval)
+	p.poller.SetInterval(p.sseConnectedPollInterval)
+	p.poller.Trigger()
 }
 
 // sseHTTPClient returns the injected HTTP client without its timeout, which would cut the long-lived stream.
@@ -303,8 +322,9 @@ func (p *DynatraceProvider) startBackgroundLoops() {
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	p.pollCancel = pollCancel
-	// TryFetch, not Fetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
-	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.TryFetch, p.successChan, p.failureChan, p.pollInterval)
+	// ticks use TryFetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
+	p.poller = internal.NewPoller(p.fetcher.TryFetch, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	p.pollDoneChan = p.poller.Start(pollCtx)
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
