@@ -1,6 +1,7 @@
 package dynatrace
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -158,4 +159,96 @@ func TestNewProvider_BlankMetricsOriginFallsBackToGeo(t *testing.T) {
 	p, err := NewProvider(validSDKKey, WithMetricsOrigin("  "))
 	require.NoError(t, err)
 	assert.Equal(t, "https://metrics.us.fm.dynatrace.com/v1/metrics", p.config.metricsURL)
+}
+
+func envMap(vars map[string]string) ProviderOption {
+	return withLookupEnv(func(name string) (string, bool) {
+		v, ok := vars[name]
+		return v, ok
+	})
+}
+
+func TestNewProvider_Env_UsedWhenNotSetInCode(t *testing.T) {
+	for _, codeKey := range []string{"", "   "} {
+		t.Run("code key "+strconv.Quote(codeKey), func(t *testing.T) {
+			p, err := NewProvider(codeKey, envMap(map[string]string{
+				envSDKKey:        validSDKKey,
+				envConfigOrigin:  "https://cdn.eu.fm.dynatracelabs.com",
+				envMetricsOrigin: "https://metrics.eu.fm.dynatracelabs.com",
+			}))
+			require.NoError(t, err)
+			assert.Equal(t, validSDKKey, p.config.sdkKey)
+			assert.Equal(t, "https://cdn.eu.fm.dynatracelabs.com/server/"+validSDKKey+".json", p.config.cdnURL)
+			assert.Equal(t, "https://metrics.eu.fm.dynatracelabs.com/v1/metrics", p.config.metricsURL)
+		})
+	}
+}
+
+func TestNewProvider_Env_CodeWins(t *testing.T) {
+	const envKey = "dt01.server_eu_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
+	p, err := NewProvider(validSDKKey,
+		WithConfigOrigin("https://cdn.code.example.com"),
+		WithMetricsOrigin("https://metrics.code.example.com"),
+		envMap(map[string]string{
+			envSDKKey:        envKey,
+			envConfigOrigin:  "https://cdn.env.example.com",
+			envMetricsOrigin: "https://metrics.env.example.com",
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, validSDKKey, p.config.sdkKey)
+	assert.Equal(t, "https://cdn.code.example.com/server/"+validSDKKey+".json", p.config.cdnURL)
+	assert.Equal(t, "https://metrics.code.example.com/v1/metrics", p.config.metricsURL)
+}
+
+func TestNewProvider_Env_EmptyTreatedAsUnset(t *testing.T) {
+	for _, v := range []string{"", "   "} {
+		t.Run(strconv.Quote(v), func(t *testing.T) {
+			p, err := NewProvider(validSDKKey, envMap(map[string]string{
+				envSDKKey:        v,
+				envConfigOrigin:  v,
+				envMetricsOrigin: v,
+			}))
+			require.NoError(t, err)
+			// defaults derived from the key
+			assert.Equal(t, "https://cdn.us.fm.dynatrace.com/server/"+validSDKKey+".json", p.config.cdnURL)
+			assert.Equal(t, "https://metrics.us.fm.dynatrace.com/v1/metrics", p.config.metricsURL)
+		})
+	}
+}
+
+func TestNewProvider_Env_InvalidValueFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		envVar string
+		value  string
+	}{
+		{"bad config origin", envConfigOrigin, "https://cdn.example.com/server"},
+		{"bad metrics origin", envMetricsOrigin, "ftp://metrics.example.com"},
+		{"bad sdk key", envSDKKey, "dt01.client_us_abcdef1234.secretsecretsecretsecretsecret00_a1b2c3d4e5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{envSDKKey: validSDKKey, tc.envVar: tc.value}
+			_, err := NewProvider("", envMap(env))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.envVar)
+			assert.NotContains(t, err.Error(), "secretsecret")
+		})
+	}
+}
+
+func TestNewProvider_Env_MissingSDKKeyFails(t *testing.T) {
+	_, err := NewProvider("  ", envMap(nil))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), envSDKKey)
+}
+
+func TestNewProvider_Env_DefaultsToProcessEnv(t *testing.T) {
+	t.Setenv(envSDKKey, validSDKKey)
+	t.Setenv(envConfigOrigin, "")
+	t.Setenv(envMetricsOrigin, "")
+	p, err := NewProvider("")
+	require.NoError(t, err)
+	assert.Equal(t, validSDKKey, p.config.sdkKey)
 }
