@@ -26,6 +26,10 @@ github.com/hashicorp/golang-lru v0.5.0/go.mod h1:/m3WP610KZHVQ1SGc6re/UDhFvYD7pJ
 github.com/hashicorp/golang-lru v0.5.4/go.mod h1:iADmTwqILo4mZ8BN3D2Q6+9jd8WM5uGBxy+E8yxSoD4=
 github.com/hashicorp/golang-lru v1.0.2 h1:dV3g9Z/unq5DpblPpw+Oqcv4dU/1omnb4Ok8iPY6p1c=
 github.com/hashicorp/golang-lru v1.0.2/go.mod h1:iADmTwqILo4mZ8BN3D2Q6+9jd8WM5uGBxy+E8yxSoD4=
+github.com/launchdarkly/eventsource v1.9.1 h1:Ov89TFuSrKZewotRvnh6CuqXqlxJhk4JMPWdR3l1DJQ=
+github.com/launchdarkly/eventsource v1.9.1/go.mod h1:IBckHy1VOjJGqSg07EJJLiUnk5DPunX9LKD9vbcgeHo=
+github.com/launchdarkly/go-test-helpers/v2 v2.2.0 h1:L3kGILP/6ewikhzhdNkHy1b5y4zs50LueWenVF0sBbs=
+github.com/launchdarkly/go-test-helpers/v2 v2.2.0/go.mod h1:L7+th5govYp5oKU9iN7To5PgznBuIjBPn+ejqKR0avw=
 github.com/open-feature/flagd-schemas v0.2.15 h1:Oztbc2MCX5LUFNhYAVj3A0K2IroK1DzOqwmfcsvaw58=
 github.com/open-feature/flagd-schemas v0.2.15/go.mod h1:C0jnJ4C3j2LzGuqKgLDdTsdfKEWQp6sOHZyxu3QohFU=
 github.com/open-feature/flagd/core v0.19.2 h1:A4in28vxV0R2IHwZ621xZ0s4LBWMMx4AW7os9Li0w9A=
