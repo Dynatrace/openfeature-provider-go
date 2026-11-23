@@ -134,9 +134,9 @@ func TestRunSSE_NeverConnectedStillStopsPromptlyOnCancel(t *testing.T) {
 	stop()
 }
 
-// the library can deadlock when a stream is closed while it holds a decoded event; events that never stop
-// arriving make that the common case, so every iteration must still shut down.
-// This test guards the close workaround in consumeUntilDone: keep it, and re-run it when upgrading eventsource.
+// eventsource before v1.11.1 could deadlock when a stream was closed while it held a decoded event; events
+// that never stop arriving make that likely. A hung stream is abandoned after sseDrainLimit, so every stop must
+// finish well before that. Keep this test as a regression guard when changing the eventsource version.
 func TestRunSSE_StopsWhileEventsKeepArriving(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -152,15 +152,17 @@ func TestRunSSE_StopsWhileEventsKeepArriving(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	for range 10 {
+	for i := range 100 {
 		connected, stop := runSSE(t, srv.URL, SSEOptions{})
 		select {
 		case <-connected:
 		case <-time.After(sseTestTimeout):
 			t.Fatal("not connected")
 		}
-		time.Sleep(5 * time.Millisecond) // let events flow before stopping
+		time.Sleep(time.Duration(i%5) * time.Millisecond) // vary how long events flow before stopping
+		start := time.Now()
 		stop()
+		require.Less(t, time.Since(start), sseDrainLimit/2, "iteration %d: the stream must close, not be abandoned", i)
 	}
 }
 

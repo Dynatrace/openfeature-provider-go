@@ -8,7 +8,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/launchdarkly/eventsource"
@@ -24,8 +23,6 @@ const (
 	// sseIdleTimeout is how long nothing at all may arrive before we treat the connection as dead and reconnect.
 	sseIdleTimeout = 150 * time.Second
 
-	// sseCloseGrace is how long the library gets to drop a cancelled connection before we close the stream.
-	sseCloseGrace = 250 * time.Millisecond
 	// sseDrainLimit is the longest we wait for the stream to finish closing; after that we give up on it.
 	sseDrainLimit = 2 * time.Second
 
@@ -68,9 +65,7 @@ func RunSSE(ctx context.Context, rawURL string, opts SSEOptions, onConnected fun
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		connLost := make(chan struct{})
-		var lostOnce sync.Once
-		stream := connectWithRetry(ctx, rawURL, opts, func() { lostOnce.Do(func() { close(connLost) }) })
+		stream := connectWithRetry(ctx, rawURL, opts)
 		if stream == nil {
 			return
 		}
@@ -78,7 +73,7 @@ func RunSSE(ctx context.Context, rawURL string, opts SSEOptions, onConnected fun
 		if onConnected != nil {
 			onConnected()
 		}
-		consumeUntilDone(ctx, stream, connLost)
+		consumeUntilDone(ctx, stream)
 		slog.Info("sse: closed", "url", MaskURL(rawURL))
 	}()
 	return done
@@ -86,10 +81,10 @@ func RunSSE(ctx context.Context, rawURL string, opts SSEOptions, onConnected fun
 
 // connectWithRetry opens the stream, retrying until it connects or ctx is cancelled (then it returns nil).
 // We retry ourselves because the library's own first-connection retry cannot be interrupted.
-func connectWithRetry(ctx context.Context, rawURL string, opts SSEOptions, onCancelledConnLost func()) *eventsource.Stream {
+func connectWithRetry(ctx context.Context, rawURL string, opts SSEOptions) *eventsource.Stream {
 	delay := opts.InitialRetry
 	for attempt := 1; ; attempt++ {
-		stream, err := subscribe(ctx, rawURL, opts, onCancelledConnLost)
+		stream, err := subscribe(ctx, rawURL, opts)
 		if err == nil {
 			return stream
 		}
@@ -118,9 +113,9 @@ func withSSEJitter(d time.Duration) time.Duration {
 	return d - time.Duration(rand.Int64N(spread))
 }
 
-// subscribe opens the stream once; after that the library reconnects on its own. onCancelledConnLost is
-// called when the library reports the dropped connection after ctx was cancelled.
-func subscribe(ctx context.Context, rawURL string, opts SSEOptions, onCancelledConnLost func()) (*eventsource.Stream, error) {
+// subscribe opens the stream once; after that the library reconnects on its own. The library also watches
+// ctx: once it is cancelled, the stream closes itself and the error handler is no longer called.
+func subscribe(ctx context.Context, rawURL string, opts SSEOptions) (*eventsource.Stream, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -133,32 +128,20 @@ func subscribe(ctx context.Context, rawURL string, opts SSEOptions, onCancelledC
 		eventsource.StreamOptionUseJitter(sseJitterRatio),
 		// the handler replaces the Errors channel, so nothing needs draining; it only logs
 		eventsource.StreamOptionErrorHandler(func(err error) eventsource.StreamErrorHandlerResult {
-			if ctx.Err() != nil {
-				onCancelledConnLost()
-				return eventsource.StreamErrorHandlerResult{}
-			}
 			slog.Warn("sse: stream error; the stream reconnects on its own", "url", MaskURL(rawURL), "error", describeError(err))
 			return eventsource.StreamErrorHandlerResult{}
 		}),
 	)
 }
 
-// consumeUntilDone discards events until ctx is cancelled, then closes the stream. Events must keep being read,
-// even after Close, or the library blocks.
+// consumeUntilDone discards events until ctx is cancelled, then waits for the stream to close, so the
+// connection is gone when RunSSE returns. The wait is bounded so Shutdown cannot hang.
 // Discarding is a placeholder until change notifications are handled (they will trigger a CDN fetch).
-//
-// Closing the stream right after the cancel can deadlock the library (eventsource v1.9.1). So we first wait
-// for it to report the dropped connection, or for a short grace period, and we bound the final wait so
-// Shutdown cannot hang.
-func consumeUntilDone(ctx context.Context, stream *eventsource.Stream, connLost <-chan struct{}) {
+func consumeUntilDone(ctx context.Context, stream *eventsource.Stream) {
 	if drainEvents(stream.Events, ctx.Done(), nil) {
 		return // the stream ended by itself
 	}
-	grace := time.NewTimer(sseCloseGrace)
-	defer grace.Stop()
-	if drainEvents(stream.Events, connLost, grace.C) {
-		return
-	}
+	// the library already closes the stream when ctx is cancelled; Close is idempotent and makes that explicit
 	stream.Close()
 	limit := time.NewTimer(sseDrainLimit)
 	defer limit.Stop()
