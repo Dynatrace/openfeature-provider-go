@@ -3,6 +3,7 @@ module github.com/Dynatrace/openfeature-provider-go
 go 1.26.0
 
 require (
+	github.com/launchdarkly/eventsource v1.14.2
 	github.com/open-feature/flagd/core v0.19.2
 	github.com/open-feature/go-sdk v1.20.0
 	github.com/stretchr/testify v1.12.1
