@@ -30,10 +30,16 @@ type sseEnv struct {
 	clients atomic.Int32
 	// total counts every stream connection ever opened
 	total atomic.Int32
+	// configRequests counts every request the CDN received for the config
+	configRequests atomic.Int32
 	// configBody builds the CDN response from the server's own origin
 	configBody func(origin string) string
 	// failConfig makes the CDN answer 503 instead of the config, while true
 	failConfig atomic.Bool
+	// rejectConfig makes the CDN answer 404, a failure the fetcher does not retry, while true
+	rejectConfig atomic.Bool
+	// invalidConfig makes the CDN answer 200 with a body that cannot be applied, while true
+	invalidConfig atomic.Bool
 }
 
 func newSSEEnv(t *testing.T, configBody func(origin string) string) *sseEnv {
@@ -50,8 +56,17 @@ func newSSEEnv(t *testing.T, configBody func(origin string) string) *sseEnv {
 			<-r.Context().Done()
 			return
 		}
+		env.configRequests.Add(1)
 		if env.failConfig.Load() {
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if env.rejectConfig.Load() {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if env.invalidConfig.Load() {
+			fmt.Fprint(w, `{"flags": "not a flag set"}`)
 			return
 		}
 		w.Header().Set("ETag", `"test-etag"`)
@@ -69,6 +84,13 @@ func configWithEventStreams(eventStreams string) func(string) string {
   "eventStreams": %s
 }`, strings.ReplaceAll(eventStreams, "{origin}", origin))
 	}
+}
+
+// configRequestsDuring is how many config requests the CDN receives over the next d.
+func (e *sseEnv) configRequestsDuring(d time.Duration) int32 {
+	before := e.configRequests.Load()
+	time.Sleep(d)
+	return e.configRequests.Load() - before
 }
 
 func (e *sseEnv) provider(t *testing.T, opts ...ProviderOption) *DynatraceProvider {
@@ -192,4 +214,124 @@ func TestProvider_SSE_OpensTheStreamAfterAFailedInitRecovers(t *testing.T) {
 
 	require.Eventually(t, func() bool { return env.clients.Load() == 1 }, sseTestWait, sseTestStep,
 		"the first successful poll must open the stream")
+}
+
+func TestProvider_SSE_ConnectTriggersOneCatchUpFetch(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	// polling never ticks, so every request beyond the first is the catch-up
+	initProvider(t, env.provider(t, withPollInterval(time.Hour)))
+
+	require.Eventually(t, func() bool { return env.configRequests.Load() == 2 }, sseTestWait, sseTestStep,
+		"init fetch plus one catch-up fetch on connect")
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, int32(2), env.configRequests.Load(), "the catch-up is a single fetch")
+}
+
+func TestProvider_SSE_NoStreamMeansNoCatchUpFetch(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[]`))
+	initProvider(t, env.provider(t, withPollInterval(time.Hour)))
+
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, int32(1), env.configRequests.Load(), "only the init fetch")
+}
+
+func TestProvider_SSE_PollingRelaxesWhileConnectedAndSuccessfulFetch(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	initProvider(t, env.provider(t,
+		withPollInterval(50*time.Millisecond),
+		WithSSEConnectedPollInterval(time.Hour),
+	))
+	require.Eventually(t, func() bool { return env.clients.Load() == 1 }, sseTestWait, sseTestStep)
+	time.Sleep(300 * time.Millisecond) // lets the catch-up and any tick before the switch settle
+	settled := env.configRequests.Load()
+
+	time.Sleep(400 * time.Millisecond)
+
+	assert.Equal(t, settled, env.configRequests.Load(), "50ms polling must give way to the hour-long connected interval")
+}
+
+func TestProvider_SSE_ConnectedIntervalSetsTheCadence(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	// the disconnected interval would never tick; only the connected one can produce these requests
+	initProvider(t, env.provider(t,
+		withPollInterval(time.Hour),
+		WithSSEConnectedPollInterval(100*time.Millisecond),
+	))
+
+	require.Eventually(t, func() bool { return env.configRequests.Load() >= 5 }, sseTestWait, sseTestStep)
+}
+
+func TestProvider_SSE_UnreachableStreamKeepsTheDisconnectedCadence(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"http://127.0.0.1:1/sse"}]`))
+	initProvider(t, env.provider(t,
+		withPollInterval(50*time.Millisecond),
+		WithSSEConnectedPollInterval(time.Hour),
+	))
+
+	require.Eventually(t, func() bool { return env.configRequests.Load() >= 5 }, sseTestWait, sseTestStep,
+		"never connected, so polling stays at the aggressive cadence")
+}
+
+func TestNewProvider_SSEConnectedPollIntervalDefaultsToTenMinutes(t *testing.T) {
+	p, err := NewProvider(validSDKKey)
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, p.sseConnectedPollInterval)
+	assert.Equal(t, 10*time.Second, p.pollInterval)
+}
+
+// cadenceFast and cadenceSlow are far enough apart that a window of cadenceWindow tells them apart even under -race
+const (
+	cadenceFast   = 20 * time.Millisecond
+	cadenceSlow   = 300 * time.Millisecond
+	cadenceWindow = 400 * time.Millisecond
+)
+
+// relaxedProvider starts a provider whose stream is connected and whose catch-up fetch succeeded, so polling
+// runs at the slow, connected cadence.
+func relaxedProvider(t *testing.T, env *sseEnv) {
+	t.Helper()
+	initProvider(t, env.provider(t, withPollInterval(cadenceFast), WithSSEConnectedPollInterval(cadenceSlow)))
+	require.Eventually(t, func() bool { return env.clients.Load() == 1 }, sseTestWait, sseTestStep)
+	require.Eventually(t, func() bool { return env.configRequestsDuring(cadenceWindow) <= 3 }, sseTestWait, sseTestStep,
+		"polling must relax once the stream is connected and the catch-up fetch succeeded")
+}
+
+func TestProvider_SSE_FailedFetchWhileConnectedRestoresTheShortCadence(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	relaxedProvider(t, env)
+
+	env.rejectConfig.Store(true)
+	// the failure is only seen by the next (slow) poll; after it, polling must be fast again
+	require.Eventually(t, func() bool { return env.configRequestsDuring(cadenceWindow) >= 5 }, sseTestWait, sseTestStep,
+		"a failed fetch must restore the short cadence although the stream is still connected")
+	assert.Equal(t, int32(1), env.clients.Load(), "the stream stays connected")
+
+	env.rejectConfig.Store(false)
+	require.Eventually(t, func() bool { return env.configRequestsDuring(cadenceWindow) <= 3 }, sseTestWait, sseTestStep,
+		"the next successful fetch relaxes polling again")
+}
+
+func TestProvider_SSE_UnapplicableConfigWhileConnectedRestoresTheShortCadence(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	relaxedProvider(t, env)
+
+	env.invalidConfig.Store(true)
+	require.Eventually(t, func() bool { return env.configRequestsDuring(cadenceWindow) >= 5 }, sseTestWait, sseTestStep,
+		"a config that cannot be applied must restore the short cadence")
+
+	env.invalidConfig.Store(false)
+	require.Eventually(t, func() bool { return env.configRequestsDuring(cadenceWindow) <= 3 }, sseTestWait, sseTestStep,
+		"a valid config relaxes polling again")
+}
+
+func TestProvider_SSE_ConnectingAloneDoesNotRelaxPolling(t *testing.T) {
+	env := newSSEEnv(t, configWithEventStreams(`[{"type":"sse","url":"{origin}/sse"}]`))
+	p := env.provider(t, withPollInterval(cadenceFast), WithSSEConnectedPollInterval(time.Hour))
+	initProvider(t, p)
+	// every fetch after init fails, including the catch-up the connection triggers
+	env.rejectConfig.Store(true)
+	require.Eventually(t, func() bool { return env.clients.Load() == 1 }, sseTestWait, sseTestStep)
+
+	assert.GreaterOrEqual(t, env.configRequestsDuring(cadenceWindow), int32(8),
+		"a connected stream must not relax polling while fetches fail")
 }

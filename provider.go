@@ -55,10 +55,16 @@ type DynatraceProvider struct {
 	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
+	// sseConnectedPollInterval is the poll cadence while the SSE stream is connected and the last fetch
+	// succeeded; pollInterval applies otherwise
+	sseConnectedPollInterval time.Duration
+	// sseConnected is set once the stream is established; it is read by the state loop to pick the cadence
+	sseConnected atomic.Bool
 
 	state             atomic.Pointer[openfeature.State]
 	successChan       chan internal.FetchResult
 	failureChan       chan string
+	poller            *internal.Poller
 	pollCancel        context.CancelFunc
 	pollDoneChan      <-chan struct{}
 	sseDisabled       bool
@@ -104,6 +110,13 @@ func WithSSEDisabled() ProviderOption {
 	return func(p *DynatraceProvider) { p.sseDisabled = true }
 }
 
+// WithSSEConnectedPollInterval overrides the poll cadence used while the SSE stream is connected and the latest
+// fetch succeeded (default 10 minutes). Not meant for production: the cadence is fixed by spec and the option exists so labs and test suites
+// can observe it without waiting minutes.
+func WithSSEConnectedPollInterval(d time.Duration) ProviderOption {
+	return func(p *DynatraceProvider) { p.sseConnectedPollInterval = d }
+}
+
 // WithEvaluator injects a custom flagd-core evaluator. Exposed for testing.
 func WithEvaluator(e evaluator.IEvaluator) ProviderOption {
 	return func(p *DynatraceProvider) { p.evaluator = e }
@@ -130,13 +143,14 @@ func NewProvider(sdkKey string, opts ...ProviderOption) (*DynatraceProvider, err
 	eval := evaluator.NewJSON(log, flagStore)
 
 	p := &DynatraceProvider{
-		evaluator:    eval,
-		flagStore:    flagStore,
-		eventsChan:   make(chan openfeature.Event, channelBufferSize),
-		pollInterval: internal.DefaultPollInterval,
-		gracePeriod:  defaultGracePeriod,
-		successChan:  make(chan internal.FetchResult, channelBufferSize),
-		failureChan:  make(chan string, channelBufferSize),
+		evaluator:                eval,
+		flagStore:                flagStore,
+		eventsChan:               make(chan openfeature.Event, channelBufferSize),
+		pollInterval:             internal.DefaultPollInterval,
+		gracePeriod:              defaultGracePeriod,
+		sseConnectedPollInterval: internal.DefaultSSEConnectedPollInterval,
+		successChan:              make(chan internal.FetchResult, channelBufferSize),
+		failureChan:              make(chan string, channelBufferSize),
 	}
 	p.setState(openfeature.NotReadyState)
 	for _, opt := range opts {
@@ -264,12 +278,20 @@ func (p *DynatraceProvider) ensureSSEStarted(body string) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := internal.RunSSE(ctx, sseURL, internal.SSEOptions{Client: p.sseHTTPClient()}, nil)
+	done := internal.RunSSE(ctx, sseURL, internal.SSEOptions{Client: p.sseHTTPClient()}, p.onSSEConnected)
 	p.sseStop = func() {
 		cancel()
 		<-done
 	}
 	slog.Info("opening sse stream", "url", internal.MaskURL(sseURL))
+}
+
+// onSSEConnected runs when the stream is established: a change may have been announced before it was, so it
+// fetches once now. The cadence is not changed here; the state loop relaxes it once that fetch succeeds.
+func (p *DynatraceProvider) onSSEConnected() {
+	slog.Info("sse connected; fetching to catch up")
+	p.sseConnected.Store(true)
+	p.poller.Trigger()
 }
 
 // sseHTTPClient returns the injected HTTP client without its timeout, which would cut the long-lived stream.
@@ -303,8 +325,9 @@ func (p *DynatraceProvider) startBackgroundLoops() {
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	p.pollCancel = pollCancel
-	// TryFetch, not Fetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
-	p.pollDoneChan = internal.Poll(pollCtx, p.fetcher.TryFetch, p.successChan, p.failureChan, p.pollInterval)
+	// ticks use TryFetch: a tick contending with an in-flight fetch is skipped, not queued (providers.md 2.1.1)
+	p.poller = internal.NewPoller(p.fetcher.TryFetch, p.fetcher.Fetch, p.successChan, p.failureChan, p.pollInterval)
+	p.pollDoneChan = p.poller.Start(pollCtx)
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	p.metricsCancel = metricsCancel
@@ -517,8 +540,24 @@ func (p *DynatraceProvider) stateLoop() {
 		close(p.stateLoopDoneChan)
 	}()
 
+	// tracks the interval the poller currently runs at
+	interval := p.pollInterval
+	setPollInterval := func(fetchOK bool) {
+		want := p.pollInterval
+		if fetchOK && p.sseConnected.Load() {
+			want = p.sseConnectedPollInterval
+		}
+		if want == interval {
+			return
+		}
+		interval = want
+		slog.Info("changing poll interval", "interval", want, "sse_connected", p.sseConnected.Load(), "fetch_ok", fetchOK)
+		p.poller.SetInterval(want)
+	}
+
 	// fail handles a poll or commit failure: from non-Ready it just logs; from Ready it goes Stale, emits, and arms grace
 	fail := func(reason string) {
+		setPollInterval(false)
 		if prev := p.getState(); prev != openfeature.ReadyState {
 			slog.Warn("poll failed", "state", prev, "reason", reason)
 			return
@@ -547,6 +586,8 @@ func (p *DynatraceProvider) stateLoop() {
 				// starts the stream after a failed init, when there was no config to read it from
 				p.ensureSSEStarted(result.Body)
 			}
+			// a 304 also counts: the applied config is confirmed current
+			setPollInterval(true)
 			stopGrace()
 			// NotReady covers a failed init: the first successful poll brings the provider up, so it must emit PROVIDER_READY
 			if prev := p.getState(); prev != openfeature.ReadyState {
