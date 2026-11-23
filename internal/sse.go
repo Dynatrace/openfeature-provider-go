@@ -21,8 +21,8 @@ const (
 	defaultSSEMaxRetry     = 30 * time.Second
 	// sseJitterRatio randomizes retry delays, so many providers do not reconnect at the same moment after an outage.
 	sseJitterRatio = 0.5
-	// sseReadTimeout is how long nothing at all may arrive before we treat the connection as dead and reconnect.
-	sseReadTimeout = 150 * time.Second
+	// sseIdleTimeout is how long nothing at all may arrive before we treat the connection as dead and reconnect.
+	sseIdleTimeout = 150 * time.Second
 
 	// sseCloseGrace is how long the library gets to drop a cancelled connection before we close the stream.
 	sseCloseGrace = 250 * time.Millisecond
@@ -127,7 +127,7 @@ func subscribe(ctx context.Context, rawURL string, opts SSEOptions, onCancelledC
 	}
 	return eventsource.SubscribeWithRequestAndOptions(req,
 		eventsource.StreamOptionHTTPClient(opts.Client),
-		eventsource.StreamOptionReadTimeout(sseReadTimeout),
+		eventsource.StreamOptionReadTimeout(sseIdleTimeout),
 		eventsource.StreamOptionInitialRetry(opts.InitialRetry),
 		eventsource.StreamOptionUseBackoff(opts.MaxRetry),
 		eventsource.StreamOptionUseJitter(sseJitterRatio),
@@ -145,6 +145,7 @@ func subscribe(ctx context.Context, rawURL string, opts SSEOptions, onCancelledC
 
 // consumeUntilDone discards events until ctx is cancelled, then closes the stream. Events must keep being read,
 // even after Close, or the library blocks.
+// Discarding is a placeholder until change notifications are handled (they will trigger a CDN fetch).
 //
 // Closing the stream right after the cancel can deadlock the library (eventsource v1.9.1). So we first wait
 // for it to report the dropped connection, or for a short grace period, and we bound the final wait so
@@ -167,7 +168,7 @@ func consumeUntilDone(ctx context.Context, stream *eventsource.Stream, connLost 
 }
 
 // drainEvents discards events until the channel closes (true), or stop or timeout fires (false).
-// A nil channel never fires.
+// A nil channel never fires. Discarding is a placeholder until change notifications are handled.
 func drainEvents(events <-chan eventsource.Event, stop <-chan struct{}, timeout <-chan time.Time) bool {
 	for {
 		select {

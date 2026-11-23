@@ -79,7 +79,7 @@ var (
 	scenarioSeq atomic.Int64
 )
 
-func TestCDNE2E(t *testing.T) {
+func TestE2E(t *testing.T) {
 	suite := godog.TestSuite{
 		Name: "cdn",
 		TestSuiteInitializer: func(sc *godog.TestSuiteContext) {
