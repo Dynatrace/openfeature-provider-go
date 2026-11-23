@@ -55,8 +55,11 @@ type DynatraceProvider struct {
 	eventsChan   chan openfeature.Event
 	pollInterval time.Duration
 	gracePeriod  time.Duration
-	// sseConnectedPollInterval is the poll cadence while the SSE stream is connected; pollInterval applies otherwise
+	// sseConnectedPollInterval is the poll cadence while the SSE stream is connected and the last fetch
+	// succeeded; pollInterval applies otherwise
 	sseConnectedPollInterval time.Duration
+	// sseConnected is set once the stream is established; it is read by the state loop to pick the cadence
+	sseConnected atomic.Bool
 
 	state             atomic.Pointer[openfeature.State]
 	successChan       chan internal.FetchResult
@@ -107,8 +110,8 @@ func WithSSEDisabled() ProviderOption {
 	return func(p *DynatraceProvider) { p.sseDisabled = true }
 }
 
-// WithSSEConnectedPollInterval overrides the poll cadence used while the SSE stream is connected (default 10
-// minutes). Not meant for production: the cadence is fixed by spec and the option exists so labs and test suites
+// WithSSEConnectedPollInterval overrides the poll cadence used while the SSE stream is connected and the latest
+// fetch succeeded (default 10 minutes). Not meant for production: the cadence is fixed by spec and the option exists so labs and test suites
 // can observe it without waiting minutes.
 func WithSSEConnectedPollInterval(d time.Duration) ProviderOption {
 	return func(p *DynatraceProvider) { p.sseConnectedPollInterval = d }
@@ -284,10 +287,10 @@ func (p *DynatraceProvider) ensureSSEStarted(body string) {
 }
 
 // onSSEConnected runs when the stream is established: a change may have been announced before it was, so it
-// fetches once now, and polling relaxes to the safety-net cadence now that notifications carry the changes.
+// fetches once now. The cadence is not changed here; the state loop relaxes it once that fetch succeeds.
 func (p *DynatraceProvider) onSSEConnected() {
-	slog.Info("sse connected; relaxing polling", "interval", p.sseConnectedPollInterval)
-	p.poller.SetInterval(p.sseConnectedPollInterval)
+	slog.Info("sse connected; fetching to catch up")
+	p.sseConnected.Store(true)
 	p.poller.Trigger()
 }
 
@@ -537,8 +540,24 @@ func (p *DynatraceProvider) stateLoop() {
 		close(p.stateLoopDoneChan)
 	}()
 
+	// tracks the interval the poller currently runs at
+	interval := p.pollInterval
+	setPollInterval := func(fetchOK bool) {
+		want := p.pollInterval
+		if fetchOK && p.sseConnected.Load() {
+			want = p.sseConnectedPollInterval
+		}
+		if want == interval {
+			return
+		}
+		interval = want
+		slog.Info("changing poll interval", "interval", want, "sse_connected", p.sseConnected.Load(), "fetch_ok", fetchOK)
+		p.poller.SetInterval(want)
+	}
+
 	// fail handles a poll or commit failure: from non-Ready it just logs; from Ready it goes Stale, emits, and arms grace
 	fail := func(reason string) {
+		setPollInterval(false)
 		if prev := p.getState(); prev != openfeature.ReadyState {
 			slog.Warn("poll failed", "state", prev, "reason", reason)
 			return
@@ -567,6 +586,8 @@ func (p *DynatraceProvider) stateLoop() {
 				// starts the stream after a failed init, when there was no config to read it from
 				p.ensureSSEStarted(result.Body)
 			}
+			// a 304 also counts: the applied config is confirmed current
+			setPollInterval(true)
 			stopGrace()
 			// NotReady covers a failed init: the first successful poll brings the provider up, so it must emit PROVIDER_READY
 			if prev := p.getState(); prev != openfeature.ReadyState {

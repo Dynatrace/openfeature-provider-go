@@ -80,9 +80,10 @@ A runnable example lives in [`examples`](examples).
 ### Change notifications
 
 The flag configuration can advertise an SSE stream. When it does, the provider opens it in the background and
-fetches the configuration once it is connected, then polls every 10 minutes as a safety net. While no stream is
-connected, because none is advertised, SSE is disabled, or it cannot be reached, the provider polls every 10
-seconds. A stream that cannot be opened never fails the provider; it keeps being retried.
+fetches the configuration once it is connected. Once that fetch succeeds, it polls every 10 minutes as a safety
+net. It polls every 10 seconds instead while no stream is connected (none is advertised, SSE is disabled, or it
+cannot be reached), and whenever a fetch fails or the configuration cannot be applied, even with the stream
+connected. A stream that cannot be opened never fails the provider; it keeps being retried.
 
 ## Contributing
 

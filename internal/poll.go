@@ -13,8 +13,8 @@ const (
 	// DefaultPollInterval is the provider's poll cadence unless overridden. It applies while no SSE stream is
 	// connected, so a missed change notification is caught quickly.
 	DefaultPollInterval = 10 * time.Second
-	// DefaultSSEConnectedPollInterval is the poll cadence while the SSE stream is connected: notifications
-	// carry the changes, so polling is only a safety net (providers.md 2.1).
+	// DefaultSSEConnectedPollInterval is the poll cadence while the SSE stream is connected & fetches are
+	// successful: notifications indicate a change, so polling is only a safety net (providers.md 2.1).
 	DefaultSSEConnectedPollInterval = 10 * time.Minute
 	minPollInterval                 = time.Millisecond
 )
