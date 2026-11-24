@@ -3,7 +3,7 @@ module github.com/Dynatrace/openfeature-provider-go
 go 1.26.0
 
 require (
-	github.com/open-feature/flagd/core v0.19.2
+	github.com/open-feature/flagd/core v0.19.3
 	github.com/open-feature/go-sdk v1.20.0
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.28.0
@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/diegoholiveira/jsonlogic/v3 v3.9.1 // indirect
+	github.com/diegoholiveira/jsonlogic/v3 v3.10.2 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
