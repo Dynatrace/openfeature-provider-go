@@ -74,6 +74,18 @@ provider, err := dynatrace.NewProvider(
 | `WithConfigOrigin(origin)` | `string` | derived from SDK key | Override the flag configuration origin. |
 | `WithMetricsOrigin(origin)` | `string` | derived from SDK key | Override the evaluation metrics ingest origin. |
 
+### Environment variables
+
+| Env var | Equivalent |
+| --- | --- |
+| `DT_FM_SDK_KEY` | `sdkKey` argument (pass `""` to use the env var) |
+| `DT_FM_CONFIG_ORIGIN` | `WithConfigOrigin` |
+| `DT_FM_METRICS_ORIGIN` | `WithMetricsOrigin` |
+
+> **Note:** if `WithConfigOrigin` is set, carefully consider whether `WithMetricsOrigin` should be set too; an SDK proxy or custom host typically serves both.
+
+Precedence: value set in code > env var > default. Empty values count as unset.
+
 A runnable example lives in [`examples`](examples).
 
 ## Contributing
