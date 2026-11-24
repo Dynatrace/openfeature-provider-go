@@ -1,6 +1,7 @@
 package dynatrace
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,14 @@ import (
 )
 
 const validSDKKey = "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"
+
+func TestMain(m *testing.M) {
+	// keep a developer's DT_FM_* env out of tests that rely on defaults
+	for _, name := range []string{envSDKKey, envConfigOrigin, envMetricsOrigin} {
+		_ = os.Unsetenv(name)
+	}
+	os.Exit(m.Run())
+}
 
 func TestParseSDKKey_Valid(t *testing.T) {
 	cfg, err := parseSDKKey(validSDKKey, "", "")
@@ -223,9 +232,11 @@ func TestNewProvider_Env_InvalidValueFails(t *testing.T) {
 		envVar string
 		value  string
 	}{
-		{"bad config origin", envConfigOrigin, "https://cdn.example.com/server"},
-		{"bad metrics origin", envMetricsOrigin, "ftp://metrics.example.com"},
+		{"config origin with path", envConfigOrigin, "https://cdn.example.com/dt01.server_us_abcdef1234.secretsecretsecretsecretsecret00_a1b2c3d4e5.json"},
+		{"metrics origin with user info", envMetricsOrigin, "https://user:secretsecret@metrics.example.com"},
+		{"bad metrics origin scheme", envMetricsOrigin, "ftp://metrics.example.com"},
 		{"bad sdk key", envSDKKey, "dt01.client_us_abcdef1234.secretsecretsecretsecretsecret00_a1b2c3d4e5"},
+		{"sdk key with extra dot", envSDKKey, validSDKKey[:strings.LastIndex(validSDKKey, ".")] + ".secretsecretsecretsecretsecret00_a1b2c3d4e5.json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

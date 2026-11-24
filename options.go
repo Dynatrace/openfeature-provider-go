@@ -142,26 +142,26 @@ func resolveMetricsURL(geo string, metricsOrigin string) (string, error) {
 func normalizeOrigin(value, field string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil {
-		return "", fmt.Errorf("%s is not a valid URL; got %q: %w", field, value, err)
+		return "", fmt.Errorf("%s is not a valid URL", field)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("%s must use http or https; got %q", field, value)
+		return "", fmt.Errorf("%s must use http or https", field)
 	}
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("%s must include a host; got %q", field, value)
+		return "", fmt.Errorf("%s must include a host", field)
 	}
 	if u.Path != "" && u.Path != "/" {
-		return "", fmt.Errorf("%s must not include a path; got %q", field, value)
+		return "", fmt.Errorf("%s must not include a path", field)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return "", fmt.Errorf("%s must not include a query string; got %q", field, value)
+		return "", fmt.Errorf("%s must not include a query string", field)
 	}
 	if u.Fragment != "" {
-		return "", fmt.Errorf("%s must not include a fragment; got %q", field, value)
+		return "", fmt.Errorf("%s must not include a fragment", field)
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("%s must not include user info; got %q", field, value)
+		return "", fmt.Errorf("%s must not include user info", field)
 	}
 	// u.Host (not Hostname()+Port()) keeps the IPv6 brackets Hostname() strips; user info is already rejected, so Host is just host[:port]
 	return scheme + "://" + strings.ToLower(u.Host), nil
@@ -169,10 +169,8 @@ func normalizeOrigin(value, field string) (string, error) {
 
 func publicKeySegment(key string) string {
 	// only trust the structure with exactly two dots; otherwise redact entirely to avoid leaking an unknown private segment
-	first := strings.Index(key, ".")
-	last := strings.LastIndex(key, ".")
-	if first <= 0 || first == last {
+	if strings.Count(key, ".") != 2 || strings.HasPrefix(key, ".") {
 		return "<redacted>"
 	}
-	return key[:last]
+	return key[:strings.LastIndex(key, ".")]
 }
